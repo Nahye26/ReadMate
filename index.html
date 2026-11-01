@@ -193,7 +193,7 @@ var WORKER='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.mi
 var TN={ex:'발췌형',cx:'맥락형'};
 var STEPS=['자료','읽기 지도','미션·피드백','과제 지원','마무리'];
 var PROMPT_VERSION='v0.4';
-var CONFIG={missions:3,maxMissions:4,exSent:3,cxSent:8,cpm:400,answerMin:2,maxHints:3,recall:true,fade:true,supStart:2,adaptDepth:true,lastMinDepth:1,pdfAll:60,maxPages:40,hardPages:1500,maxPick:3};
+var CONFIG={missions:3,maxMissions:4,exSent:3,cxSent:8,cpm:400,answerMin:2,maxHints:3,recall:true,timeoutMs:75000,fade:true,supStart:2,adaptDepth:true,lastMinDepth:1,pdfAll:60,maxPages:40,hardPages:1500,maxPick:3};
 var QL={literal:'이해',inferential:'추론',evaluative:'평가'};
 
 
@@ -341,6 +341,7 @@ function errCopy(e){
     case 'not_granted':case 'sampling_disabled':case 'capability_disabled':case 'not_declared':
       return 'Claude 사용이 허용되지 않았습니다. 페이지의 권한 메뉴에서 허용해 주세요.';
     case 'bad_key':return 'Gemini 키가 맞지 않거나 이 모델을 쓸 수 없습니다. 키와 모델 이름을 확인해 주세요. ('+(e.message||'').slice(0,120)+')';
+    case 'timeout':return 'Gemini 응답이 '+(e.message||'')+' 넘게 오지 않아 중단했습니다. 시작 화면에서 “빠른 모드”를 켜거나 생각 깊이를 낮추거나 모델을 바꿔 보세요.';
     case 'network':return 'Gemini에 연결하지 못했습니다. 네트워크나 브라우저의 외부 연결 제한일 수 있습니다. (열린 곳: '+location.hostname+' / 브라우저 메시지: '+String(e.message||'').slice(0,100)+')';
     case 'rate_limited':return '요청이 잦거나 사용 한도에 닿았습니다. 잠시 뒤 직접 다시 시도해 주세요.';
     case 'prompt_too_large':return '자료가 너무 깁니다. 필요한 쪽만 잘라서 다시 올려 주세요.';
@@ -357,18 +358,20 @@ function parseJson(t){
   throw {code:'invalid_json',message:'JSON 해석 실패, 응답 앞부분: '+String(t).slice(0,80),text:t};
 }
 async function gemCall(prompt){
-  var g=CAP.gem,res;
+  var g=CAP.gem,res,ac=new AbortController(),to=setTimeout(function(){ac.abort()},CONFIG.timeoutMs);
   try{
     res=await fetch('https://generativelanguage.googleapis.com/v1beta/models/'+encodeURIComponent(g.model||GEM_MODEL)+':generateContent',{
-      method:'POST',headers:{'Content-Type':'application/json','x-goog-api-key':g.key},
+      method:'POST',signal:ac.signal,headers:{'Content-Type':'application/json','x-goog-api-key':g.key},
       body:JSON.stringify((function(){var gc={temperature:0.3,responseMimeType:'application/json',maxOutputTokens:8192};var th=g.think||(/2\.5-flash/.test(g.model||GEM_MODEL)?'budget0':'');if(th==='budget0')gc.thinkingConfig={thinkingBudget:0};else if(th==='low'||th==='minimal')gc.thinkingConfig={thinkingLevel:th};return {contents:[{role:'user',parts:[{text:prompt}]}],generationConfig:gc}})())});
-  }catch(e){throw {code:'network',message:String(e&&e.message||e)}}
+  }catch(e){clearTimeout(to);if(e&&e.name==='AbortError')throw {code:'timeout',message:CONFIG.timeoutMs/1000+'초'};throw {code:'network',message:String(e&&e.message||e)}}
   if(!res.ok){
     var code=res.status===429?'rate_limited':(res.status===400||res.status===401||res.status===403)?'bad_key':'error';
     var msg='';try{msg=(await res.json()).error.message}catch(e){}
     throw {code:code,message:msg||('HTTP '+res.status)};
   }
-  var j=await res.json(),c=j.candidates&&j.candidates[0];
+  var j;try{j=await res.json()}catch(e){clearTimeout(to);throw {code:'timeout',message:'본문 수신 중 중단'}}
+  clearTimeout(to);
+  var c=j.candidates&&j.candidates[0];
   var text=c&&c.content&&c.content.parts?c.content.parts.map(function(p){return p.text||''}).join(''):'';
   if(!text)throw {code:'invalid_json',message:'빈 응답 (종료 사유: '+(c&&c.finishReason||(j.promptFeedback&&j.promptFeedback.blockReason)||'알 수 없음')+')'};
   return {text:text,truncated:c&&c.finishReason==='MAX_TOKENS',modelTierApplied:'gemini:'+(g.model||GEM_MODEL)};
@@ -566,7 +569,7 @@ function cleanPlan(data,cands,type){
   var reqs=(data.reqs||[]).map(String).filter(Boolean).slice(0,4);
   if(!reqs.length) throw {code:'invalid_json',message:'no reqs'};
   var ms=[];
-  (data.missions||[]).slice(0,CONFIG.maxMissions).forEach(function(m){
+  (data.missions||[]).slice(0,S.fast?2:CONFIG.maxMissions).forEach(function(m){
     var picks=[],total=0,cap=type==='ex'?CONFIG.exSent:CONFIG.cxSent,per=type==='ex'?CONFIG.exSent:5;
     (m.picks||[]).slice(0,3).forEach(function(p){
       var c=S.by[p.chunk_id];if(!c||!ids[c.id])return;
@@ -603,9 +606,9 @@ async function planLive(cands,type,reqs){
   var prompt=RULES+'다음 과제와 읽기 자료를 보고 읽기 지도를 JSON으로 만드세요.\n\n[과제 안내문]\n'+S.assign+'\n\n[읽기 자료] 한 줄이 한 청크이며 [청크ID] (문장번호) 문장 형식입니다.\n'+chunkText(cands)+'\n\n'+reqLine+forced+'\n'+
    '규칙:\n- reqs: 과제 안내문을 2~4개의 요구 항목으로 나눕니다(자료 요약이 아니라 과제 요구의 정리).\n'+
    '- type: "excerpt"(특정 정보·정의·결과·인용을 찾아 쓰는 과제) 또는 "context"(저자의 논리 흐름이나 관점을 이해해야 하는 과제: 비판, 평가, 비교, 논증, 서평, 선행연구 간 관계 정리).\n'+
-   '- missions: 기본 '+CONFIG.missions+'개(최소 2개, 최대 '+CONFIG.maxMissions+'개). 각 미션은 요구 항목 하나(req 번호)와 연결합니다. 초록·요약·결론처럼 이미 요약된 청크는 미션 대상으로 고르지 말고 주장·근거·데이터가 실제로 있는 본문 청크를 고릅니다.\n'+
+   '- missions: 기본 '+(S.fast?2:CONFIG.missions)+'개(최소 2개, 최대 '+(S.fast?2:CONFIG.maxMissions)+'개). 각 미션은 요구 항목 하나(req 번호)와 연결합니다. 초록·요약·결론처럼 이미 요약된 청크는 미션 대상으로 고르지 말고 주장·근거·데이터가 실제로 있는 본문 청크를 고릅니다.\n'+
    '- picks: 위 자료에 있는 chunk_id와 문장 번호(from~to)만 사용합니다. excerpt이면 한 미션당 총 1~'+CONFIG.exSent+'문장, context이면 핵심 문장과 그 앞뒤 문단(총 3~'+CONFIG.cxSent+'문장, 청크는 최대 3개).\n'+
-   '- variants: 미션마다 같은 발췌에 대해 깊이가 다른 질문 변형을 만듭니다. "literal"(이해: 발췌에 적힌 내용을 자기 말로), "inferential"(추론: 적혀 있지 않지만 끌어낼 수 있는 원인·함의·조건 적용·문장 사이의 관계), "evaluative"(평가: 근거의 충분성, 논리의 약한 지점). 가능하면 세 가지 모두, 어려우면 literal과 inferential 두 가지는 반드시 만듭니다. 학생의 수행에 따라 앱이 하나를 골라 보여 줍니다.\n'+
+   '- variants: 미션마다 같은 발췌에 대해 깊이가 다른 질문 변형을 만듭니다. "literal"(이해: 발췌에 적힌 내용을 자기 말로), "inferential"(추론: 적혀 있지 않지만 끌어낼 수 있는 원인·함의·조건 적용·문장 사이의 관계), "evaluative"(평가: 근거의 충분성, 논리의 약한 지점). '+(S.fast?'literal과 inferential 두 가지만 만듭니다(evaluative는 만들지 않습니다).':'가능하면 세 가지 모두, 어려우면 literal과 inferential 두 가지는 반드시 만듭니다.')+' 학생의 수행에 따라 앱이 하나를 골라 보여 줍니다.\n'+
    '- 각 변형의 question: 하나만, 60자 이내. 원문 문장을 그대로 옮기지 말고 qtype에 맞게 씁니다.\n'+
    '- 각 변형의 cue: 읽기 전에 학생이 주목할 점 한 문장, 40자 이내(어디를, 어떤 관계를 볼지). 답 자체를 말하지 않습니다.\n'+
    '- 각 변형의 frame: 답변을 시작할 틀 한 문장, 50자 이내, 빈칸(____)을 포함합니다. 핵심 요소의 내용은 빈칸 밖에 쓰지 않습니다.\n'+
@@ -634,6 +637,7 @@ function init(){
    '<label class="fld" for="who">시행자 (선택)</label><select id="who"><option value="">선택 안 함</option>'+[1,2,3,4,5].map(function(n){return '<option value="'+n+'">'+n+'번</option>'}).join('')+'</select>'+
    '<label class="fld" for="pid">논문 ID (제목 말고 번호, 예: P01)</label><input type="text" id="pid" placeholder="P01" maxlength="20">'+
    '<label class="fld"><input type="checkbox" id="devon"> 개발용 기록 저장: 읽기 지도, 질문, 피드백, 내 답변 문장을 팀 공유 저장소에 남깁니다. 팀원끼리 하는 내부 시행에서만 켜세요. <span class="note" id="devnote"></span></label>'+
+   '<label class="fld"><input type="checkbox" id="fast"> 빠른 모드: 미션 2개, 질문 변형은 이해·추론 두 가지만 만들어 분석 응답을 줄입니다. (느릴 때 켜세요)</label>'+
    '<label class="fld"><input type="checkbox" id="consent"> 연구용으로 세션 요약(횟수와 점수만, 자료와 답변 내용 제외)을 익명 저장하는 데 동의합니다. (선택)</label>'+
    '<div class="opt" id="gembox" hidden><h3 class="k">Claude 연결이 없는 환경: Gemini 키로 실행</h3>'+
    '<p class="note">이 페이지가 claude.ai 밖에서 열렸습니다. Google AI Studio에서 무료 API 키를 발급받아 아래에 넣으면 같은 흐름이 Gemini로 실행됩니다. 키는 이 탭의 메모리에만 있고 저장하지 않습니다. 무료 키로 보낸 내용은 Google의 제품 개선에 쓰일 수 있으니 민감한 자료는 쓰지 마세요.</p>'+
@@ -668,6 +672,7 @@ async function startLive(){
   if(!asg){$('#asg2').focus();st.textContent='과제 안내문을 입력해 주세요.';return}
   if(!f&&!paste){st.textContent='읽기 자료를 올리거나 붙여넣어 주세요.';return}
   var consent=$('#consent').checked,who=$('#who').value,pid=$('#pid').value.trim(),devon=$('#devon').checked;
+  S.fast=!!($('#fast')&&$('#fast').checked);
   busy(true);st.textContent='자료를 읽는 중…';
   var chunks,name;
   try{
@@ -687,20 +692,22 @@ async function startLive(){
   log('upload',{source:'user',chunks:chunks.length,chars:chars});
   var tk0=Date.now(),tk=null,base0='Claude가 과제 안내문과 자료를 읽고 읽기 지도를 만드는 중입니다. 자료 길이에 따라 10초에서 1분쯤 걸려요.';
   var th=add('ai','<p>Claude가 과제 안내문과 자료를 읽고 읽기 지도를 만드는 중입니다. 몇 초에서 1분쯤 걸려요.</p>');
-  tk=setInterval(function(){var p=th.querySelector('p');if(p)p.textContent=base0+' (경과 '+Math.round((Date.now()-tk0)/1000)+'초)'},1000);
+  tk=setInterval(function(){var p=th.querySelector('p');if(p)p.textContent=(S.stage||base0)+' (경과 '+Math.round((Date.now()-tk0)/1000)+'초)'},1000);
   try{
+    S.stage=chars>30000?'1/2 자료에서 과제와 관련된 부분을 고르는 중입니다.':'';
     var cands=chars>30000?await prefilter(chunks,asg):chunks;
+    S.stage='2/2 읽기 지도를 만드는 중입니다. (미션, 질문, 판정 기준을 함께 만드느라 가장 오래 걸립니다)';
     S.cands=cands;
     var p=await planLive(cands,null,null);
     S.type=p.type;S.plans[p.type]=p.ms;S.reqs=p.reqs;S.flowBy[p.type]=p.flow;S.reasons[p.type]=p.reason;
-    clearInterval(tk);th.remove();S.busy=false;
+    S.stage='';clearInterval(tk);th.remove();S.busy=false;
     log('analysis_done',{reqs:p.reqs.length,reading_type:p.type,missions:p.ms.length,dropped_invalid:p.dropped});
     if(p.noInfer)log('no_inferential_question',null,true);
     devInit({readingType:p.type,reqs:p.reqs,reason:p.reason,flow:p.flow,droppedInvalid:p.dropped,noInferential:p.noInfer,pagesTotal:S.pages||null,range:S.rangeInfo||null,
       missions:p.ms.map(function(m){return {req:m.req,mins:m.mins,qtype:m.qtype,question:m.q,keys:m.keys,cue:m.cue,frame:m.frame,variants:m.vars,picks:m.pick,excerpt:excerptText(m)}})});
     afterPlan();
   }catch(e){
-    clearInterval(tk);th.remove();busy(false);
+    S.stage='';clearInterval(tk);th.remove();busy(false);
     log('analysis_failed',{code:e&&e.code||'error'},true);
     add('ai','<p class="warn">'+esc(errCopy(e))+'</p>');
     st.textContent='다시 시도하려면 “내 자료로 분석 시작”을 눌러 주세요.';
