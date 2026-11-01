@@ -644,6 +644,7 @@ function init(){
    '<label class="fld" for="gkey">Gemini API 키</label><input type="password" id="gkey" autocomplete="off" placeholder="키를 붙여넣어 주세요">'+
    '<label class="fld" for="gmodel">모델 이름</label><input type="text" id="gmodel" value="'+GEM_MODEL+'">'+
    '<label class="fld" for="gthink">생각 깊이 (느릴 때 줄여 보세요)</label><select id="gthink"><option value="">기본 (설정 안 보냄)</option><option value="low">낮음 (thinkingLevel: low)</option><option value="minimal">최소 (thinkingLevel: minimal)</option><option value="budget0">끄기 (thinkingBudget: 0, 구형 모델용)</option></select>'+
+   '<div class="row"><button class="ghost" id="gtest" type="button">연결 테스트 (짧은 질문 1회)</button><span class="note" id="gtestout"></span></div>'+
    '<p class="note">이 설정은 모델마다 지원이 달라서, 선택했는데 오류가 나면 “기본”으로 돌려 주세요.</p>'+
    '<p class="note">공유 저장소가 없어서 기록은 세션 끝의 “요약과 로그 파일로 저장” 파일에 들어갑니다. 그 파일을 팀에 보내 주세요.</p></div>'+
    '<div class="row"><button class="btn" id="golive" type="button" disabled>내 자료로 분석 시작</button><span class="note" id="stat">연결 확인 중…</span></div>'+
@@ -653,6 +654,13 @@ function init(){
   $('#golive').onclick=startLive;
   $('#permfix').onclick=async function(){var o=$('#permout');o.textContent='요청 중…';o.textContent=await fixPerms()};
   function gemSync(){var k=$('#gkey'),m=$('#gmodel');var tk=$('#gthink');CAP.gem=(k&&k.value.trim())?{key:k.value.trim(),model:(m&&m.value.trim())||GEM_MODEL,think:tk?tk.value:''}:null;liveReady()}
+  $('#gtest').onclick=async function(){
+    gemSync();var o=$('#gtestout');
+    if(!CAP.gem){o.textContent='키를 먼저 넣어 주세요.';return}
+    o.textContent='확인 중…';var t0=Date.now();
+    try{var r=await gemCall('JSON으로만 답하세요: {"ok":true}');o.textContent='응답 '+((Date.now()-t0)/1000).toFixed(1)+'초: '+String(r.text).slice(0,60)+' (모델: '+(CAP.gem.model||GEM_MODEL)+')'}
+    catch(e){o.textContent=errCopy(e)}
+  };
   $('#gkey').addEventListener('input',gemSync);$('#gmodel').addEventListener('input',gemSync);$('#gthink').addEventListener('change',gemSync);
   $('#asg2').addEventListener('input',function(){lsSet('readmate-assign',$('#asg2').value)});
   liveReady();historyPanel();
