@@ -306,7 +306,7 @@ function highlight(pick){
 
 /* ---------- 무료로 쓸 수 있는 기능: Claude(뷰어 본인 계정), DB, 저장 ---------- */
 var CAP={sample:null,db:null,dl:null,user:null,gem:null,ready:false};
-var GEM_MODEL='gemini-2.5-flash';
+var GEM_MODEL='gemini-3.8-flash';
 function hasLLM(){return !!(CAP.sample||(CAP.gem&&CAP.gem.key))}
 function initCaps(){
   var t0=Date.now(),diag={claude:!!(window.claude),use:!!(window.claude&&window.claude.use),framed:(function(){try{return window.top!==window.self}catch(e){return true}})(),host:(function(){try{return location.hostname}catch(e){return '?'}})(),res:{}};
@@ -361,7 +361,7 @@ async function gemCall(prompt){
   try{
     res=await fetch('https://generativelanguage.googleapis.com/v1beta/models/'+encodeURIComponent(g.model||GEM_MODEL)+':generateContent',{
       method:'POST',headers:{'Content-Type':'application/json','x-goog-api-key':g.key},
-      body:JSON.stringify((function(){var gc={temperature:0.3,responseMimeType:'application/json',maxOutputTokens:8192};if(/2\.5-flash/.test(g.model||GEM_MODEL))gc.thinkingConfig={thinkingBudget:0};return {contents:[{role:'user',parts:[{text:prompt}]}],generationConfig:gc}})())});
+      body:JSON.stringify((function(){var gc={temperature:0.3,responseMimeType:'application/json',maxOutputTokens:8192};var th=g.think||(/2\.5-flash/.test(g.model||GEM_MODEL)?'budget0':'');if(th==='budget0')gc.thinkingConfig={thinkingBudget:0};else if(th==='low'||th==='minimal')gc.thinkingConfig={thinkingLevel:th};return {contents:[{role:'user',parts:[{text:prompt}]}],generationConfig:gc}})())});
   }catch(e){throw {code:'network',message:String(e&&e.message||e)}}
   if(!res.ok){
     var code=res.status===429?'rate_limited':(res.status===400||res.status===401||res.status===403)?'bad_key':'error';
@@ -374,7 +374,10 @@ async function gemCall(prompt){
   return {text:text,truncated:c&&c.finishReason==='MAX_TOKENS',modelTierApplied:'gemini:'+(g.model||GEM_MODEL)};
 }
 async function ask(prompt,tier){
-  var r=CAP.sample?await CAP.sample(prompt,{modelTier:tier||'default',cache:false}):await gemCall(prompt);
+  var t0=Date.now(),r;
+  try{r=CAP.sample?await CAP.sample(prompt,{modelTier:tier||'default',cache:false}):await gemCall(prompt)}
+  catch(e){log('llm_call',{ms:Date.now()-t0,inChars:prompt.length,ok:false,code:(e&&e.code)||'error'},true);throw e}
+  log('llm_call',{ms:Date.now()-t0,inChars:prompt.length,outChars:(r.text||'').length,ok:true});
   var k=r.modelTierApplied||tier||'default';
   S.tiers[k]=(S.tiers[k]||0)+1;
   if(r.truncated) throw {code:'invalid_json',message:'truncated',text:r.text};
@@ -603,10 +606,11 @@ async function planLive(cands,type,reqs){
    '- missions: 기본 '+CONFIG.missions+'개(최소 2개, 최대 '+CONFIG.maxMissions+'개). 각 미션은 요구 항목 하나(req 번호)와 연결합니다. 초록·요약·결론처럼 이미 요약된 청크는 미션 대상으로 고르지 말고 주장·근거·데이터가 실제로 있는 본문 청크를 고릅니다.\n'+
    '- picks: 위 자료에 있는 chunk_id와 문장 번호(from~to)만 사용합니다. excerpt이면 한 미션당 총 1~'+CONFIG.exSent+'문장, context이면 핵심 문장과 그 앞뒤 문단(총 3~'+CONFIG.cxSent+'문장, 청크는 최대 3개).\n'+
    '- variants: 미션마다 같은 발췌에 대해 깊이가 다른 질문 변형을 만듭니다. "literal"(이해: 발췌에 적힌 내용을 자기 말로), "inferential"(추론: 적혀 있지 않지만 끌어낼 수 있는 원인·함의·조건 적용·문장 사이의 관계), "evaluative"(평가: 근거의 충분성, 논리의 약한 지점). 가능하면 세 가지 모두, 어려우면 literal과 inferential 두 가지는 반드시 만듭니다. 학생의 수행에 따라 앱이 하나를 골라 보여 줍니다.\n'+
-   '- 각 변형의 question: 하나만. 원문 문장을 그대로 옮기지 말고 qtype에 맞게 씁니다.\n'+
-   '- 각 변형의 cue: 읽기 전에 학생이 주목할 점 한 문장(어디를, 어떤 관계를 볼지). 답 자체를 말하지 않습니다.\n'+
-   '- 각 변형의 frame: 답변을 시작할 틀 한 문장, 빈칸(____)을 포함합니다. 핵심 요소의 내용은 빈칸 밖에 쓰지 않습니다.\n'+
-   '- 각 변형의 key_points: 학생의 답이 맞는지 판정할 핵심 요소 2~3개를 짧은 문장으로. 학생에게 공개하지 않는 판정 기준입니다.\n'+
+   '- 각 변형의 question: 하나만, 60자 이내. 원문 문장을 그대로 옮기지 말고 qtype에 맞게 씁니다.\n'+
+   '- 각 변형의 cue: 읽기 전에 학생이 주목할 점 한 문장, 40자 이내(어디를, 어떤 관계를 볼지). 답 자체를 말하지 않습니다.\n'+
+   '- 각 변형의 frame: 답변을 시작할 틀 한 문장, 50자 이내, 빈칸(____)을 포함합니다. 핵심 요소의 내용은 빈칸 밖에 쓰지 않습니다.\n'+
+   '- 각 변형의 key_points: 학생의 답이 맞는지 판정할 핵심 요소 2개를 각 30자 이내로. 학생에게 공개하지 않는 판정 기준입니다.\n'+
+   '- 군더더기 설명 없이 JSON만, 가능한 한 짧게 씁니다.\n'+
    '- flow: 전체 흐름 파악용으로만 보면 되는 청크 ID(초록·요약·결론 등, 없으면 빈 배열).\n- reason: 읽기 유형을 그렇게 판단한 이유 한 문장.\n\n'+
    'JSON만 출력하세요. 형식 예: {"reqs":["..."],"type":"excerpt","reason":"...","missions":[{"req":1,"picks":[{"chunk_id":"p3-2","from":1,"to":2}],"variants":[{"qtype":"literal","question":"...","cue":"...","frame":"... ____ ...","key_points":["..."]},{"qtype":"inferential","question":"...","cue":"...","frame":"...","key_points":["...","..."]},{"qtype":"evaluative","question":"...","cue":"...","frame":"...","key_points":["..."]}]}],"flow":["p1-1"]}';
   var data=await ask(prompt,'default');
@@ -629,12 +633,14 @@ function init(){
    '<label class="fld" for="paste">또는 본문 붙여넣기</label><textarea id="paste" placeholder="PDF가 스캔본이면 본문을 여기에 붙여넣어 주세요."></textarea>'+
    '<label class="fld" for="who">시행자 (선택)</label><select id="who"><option value="">선택 안 함</option>'+[1,2,3,4,5].map(function(n){return '<option value="'+n+'">'+n+'번</option>'}).join('')+'</select>'+
    '<label class="fld" for="pid">논문 ID (제목 말고 번호, 예: P01)</label><input type="text" id="pid" placeholder="P01" maxlength="20">'+
-   '<label class="fld"><input type="checkbox" id="devon"> 개발용 기록 저장: 읽기 지도, 질문, 피드백, 내 답변 문장을 팀 공유 저장소에 남깁니다. 팀원끼리 하는 내부 시행에서만 켜세요.</label>'+
+   '<label class="fld"><input type="checkbox" id="devon"> 개발용 기록 저장: 읽기 지도, 질문, 피드백, 내 답변 문장을 팀 공유 저장소에 남깁니다. 팀원끼리 하는 내부 시행에서만 켜세요. <span class="note" id="devnote"></span></label>'+
    '<label class="fld"><input type="checkbox" id="consent"> 연구용으로 세션 요약(횟수와 점수만, 자료와 답변 내용 제외)을 익명 저장하는 데 동의합니다. (선택)</label>'+
    '<div class="opt" id="gembox" hidden><h3 class="k">Claude 연결이 없는 환경: Gemini 키로 실행</h3>'+
    '<p class="note">이 페이지가 claude.ai 밖에서 열렸습니다. Google AI Studio에서 무료 API 키를 발급받아 아래에 넣으면 같은 흐름이 Gemini로 실행됩니다. 키는 이 탭의 메모리에만 있고 저장하지 않습니다. 무료 키로 보낸 내용은 Google의 제품 개선에 쓰일 수 있으니 민감한 자료는 쓰지 마세요.</p>'+
    '<label class="fld" for="gkey">Gemini API 키</label><input type="password" id="gkey" autocomplete="off" placeholder="키를 붙여넣어 주세요">'+
    '<label class="fld" for="gmodel">모델 이름</label><input type="text" id="gmodel" value="'+GEM_MODEL+'">'+
+   '<label class="fld" for="gthink">생각 깊이 (느릴 때 줄여 보세요)</label><select id="gthink"><option value="">기본 (설정 안 보냄)</option><option value="low">낮음 (thinkingLevel: low)</option><option value="minimal">최소 (thinkingLevel: minimal)</option><option value="budget0">끄기 (thinkingBudget: 0, 구형 모델용)</option></select>'+
+   '<p class="note">이 설정은 모델마다 지원이 달라서, 선택했는데 오류가 나면 “기본”으로 돌려 주세요.</p>'+
    '<p class="note">공유 저장소가 없어서 기록은 세션 끝의 “요약과 로그 파일로 저장” 파일에 들어갑니다. 그 파일을 팀에 보내 주세요.</p></div>'+
    '<div class="row"><button class="btn" id="golive" type="button" disabled>내 자료로 분석 시작</button><span class="note" id="stat">연결 확인 중…</span></div>'+
    '<details class="note"><summary>연결 진단 (연결이 안 될 때 이 내용을 알려 주세요)</summary><pre id="diag" style="white-space:pre-wrap;margin:6px 0 0"></pre><div class="row"><button class="ghost" id="permfix" type="button">Claude 권한 다시 요청</button><span class="note" id="permout"></span></div></details>'+
@@ -642,15 +648,15 @@ function init(){
    '</div></div>';
   $('#golive').onclick=startLive;
   $('#permfix').onclick=async function(){var o=$('#permout');o.textContent='요청 중…';o.textContent=await fixPerms()};
-  function gemSync(){var k=$('#gkey'),m=$('#gmodel');CAP.gem=(k&&k.value.trim())?{key:k.value.trim(),model:(m&&m.value.trim())||GEM_MODEL}:null;liveReady()}
-  $('#gkey').addEventListener('input',gemSync);$('#gmodel').addEventListener('input',gemSync);
+  function gemSync(){var k=$('#gkey'),m=$('#gmodel');var tk=$('#gthink');CAP.gem=(k&&k.value.trim())?{key:k.value.trim(),model:(m&&m.value.trim())||GEM_MODEL,think:tk?tk.value:''}:null;liveReady()}
+  $('#gkey').addEventListener('input',gemSync);$('#gmodel').addEventListener('input',gemSync);$('#gthink').addEventListener('change',gemSync);
   $('#asg2').addEventListener('input',function(){lsSet('readmate-assign',$('#asg2').value)});
   liveReady();historyPanel();
 }
 function liveReady(){
   var b=$('#golive'),s=$('#stat');
   if(!b||S.step!==0||S.busy)return;
-  var dv=$('#devon');if(dv&&CAP.ready&&!CAP.db){dv.disabled=true;dv.checked=false}
+  var dv=$('#devon'),dn=$('#devnote');if(dv&&CAP.ready&&!CAP.db){dv.disabled=true;dv.checked=true;if(dn)dn.textContent='(이 환경에는 공유 저장소가 없어서 항상 켜져 있고, 기록은 세션 끝의 “요약과 로그 파일로 저장” 파일에 담깁니다.)'}
   var dg=$('#diag');if(dg&&CAP.diag){var q=CAP.diag;dg.textContent='window.claude: '+(q.claude?'있음':'없음')+'\n틀 안에서 열림(framed): '+(q.framed?'예':'아니오')+'\n주소 호스트: '+q.host+'\n확인에 걸린 시간: '+(q.ms==null?'확인 중':q.ms+'ms')+'\nsample: '+q.res.sample+'\ndb: '+q.res.db+'\ndownloads: '+q.res.downloads+'\nuser: '+q.res.user+'\n권한 상태: '+(q.perm||'확인 중')}
   var gb=$('#gembox');if(gb)gb.hidden=!(CAP.ready&&!CAP.sample);
   if(hasLLM()){b.disabled=false;s.textContent=CAP.sample?'준비됨 (Claude)':'준비됨 (Gemini)'}
@@ -679,20 +685,22 @@ async function startLive(){
   renderDoc();badges(false);$('#docnote').textContent=name+' · '+(S.rangeInfo&&!S.rangeInfo.all?S.rangeInfo.label+' · ':'')+chunks.length+'개 문단';
   add('me','과제 안내문과 읽기 자료('+name+')를 올렸습니다.');
   log('upload',{source:'user',chunks:chunks.length,chars:chars});
+  var tk0=Date.now(),tk=null,base0='Claude가 과제 안내문과 자료를 읽고 읽기 지도를 만드는 중입니다. 자료 길이에 따라 10초에서 1분쯤 걸려요.';
   var th=add('ai','<p>Claude가 과제 안내문과 자료를 읽고 읽기 지도를 만드는 중입니다. 몇 초에서 1분쯤 걸려요.</p>');
+  tk=setInterval(function(){var p=th.querySelector('p');if(p)p.textContent=base0+' (경과 '+Math.round((Date.now()-tk0)/1000)+'초)'},1000);
   try{
     var cands=chars>30000?await prefilter(chunks,asg):chunks;
     S.cands=cands;
     var p=await planLive(cands,null,null);
     S.type=p.type;S.plans[p.type]=p.ms;S.reqs=p.reqs;S.flowBy[p.type]=p.flow;S.reasons[p.type]=p.reason;
-    th.remove();S.busy=false;
+    clearInterval(tk);th.remove();S.busy=false;
     log('analysis_done',{reqs:p.reqs.length,reading_type:p.type,missions:p.ms.length,dropped_invalid:p.dropped});
     if(p.noInfer)log('no_inferential_question',null,true);
     devInit({readingType:p.type,reqs:p.reqs,reason:p.reason,flow:p.flow,droppedInvalid:p.dropped,noInferential:p.noInfer,pagesTotal:S.pages||null,range:S.rangeInfo||null,
       missions:p.ms.map(function(m){return {req:m.req,mins:m.mins,qtype:m.qtype,question:m.q,keys:m.keys,cue:m.cue,frame:m.frame,variants:m.vars,picks:m.pick,excerpt:excerptText(m)}})});
     afterPlan();
   }catch(e){
-    th.remove();busy(false);
+    clearInterval(tk);th.remove();busy(false);
     log('analysis_failed',{code:e&&e.code||'error'},true);
     add('ai','<p class="warn">'+esc(errCopy(e))+'</p>');
     st.textContent='다시 시도하려면 “내 자료로 분석 시작”을 눌러 주세요.';
