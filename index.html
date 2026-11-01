@@ -345,7 +345,7 @@ function errCopy(e){
     case 'rate_limited':return '요청이 잦거나 사용 한도에 닿았습니다. 잠시 뒤 직접 다시 시도해 주세요.';
     case 'prompt_too_large':return '자료가 너무 깁니다. 필요한 쪽만 잘라서 다시 올려 주세요.';
     case 'cancelled':return '요청을 취소했습니다.';
-    default:return 'Claude 응답을 처리하지 못했습니다. 다시 눌러 주세요.';
+    default:return 'AI 응답을 처리하지 못했습니다. 다시 눌러 주세요. (오류: '+((e&&e.code)||'error')+(e&&e.message?' / '+String(e.message).slice(0,200):'')+')';
   }
 }
 function parseJson(t){
@@ -354,14 +354,14 @@ function parseJson(t){
   var a=t.search(/[\{\[]/),b=Math.max(t.lastIndexOf('}'),t.lastIndexOf(']'));
   if(a>=0&&b>a)c.push(t.slice(a,b+1));
   for(var i=0;i<c.length;i++){try{return JSON.parse(c[i])}catch(e){}}
-  throw {code:'invalid_json',message:'no parseable JSON',text:t};
+  throw {code:'invalid_json',message:'JSON 해석 실패, 응답 앞부분: '+String(t).slice(0,80),text:t};
 }
 async function gemCall(prompt){
   var g=CAP.gem,res;
   try{
     res=await fetch('https://generativelanguage.googleapis.com/v1beta/models/'+encodeURIComponent(g.model||GEM_MODEL)+':generateContent',{
       method:'POST',headers:{'Content-Type':'application/json','x-goog-api-key':g.key},
-      body:JSON.stringify({contents:[{role:'user',parts:[{text:prompt}]}],generationConfig:{temperature:0.3,responseMimeType:'application/json'}})});
+      body:JSON.stringify((function(){var gc={temperature:0.3,responseMimeType:'application/json',maxOutputTokens:8192};if(/2\.5-flash/.test(g.model||GEM_MODEL))gc.thinkingConfig={thinkingBudget:0};return {contents:[{role:'user',parts:[{text:prompt}]}],generationConfig:gc}})())});
   }catch(e){throw {code:'network',message:String(e&&e.message||e)}}
   if(!res.ok){
     var code=res.status===429?'rate_limited':(res.status===400||res.status===401||res.status===403)?'bad_key':'error';
@@ -370,7 +370,7 @@ async function gemCall(prompt){
   }
   var j=await res.json(),c=j.candidates&&j.candidates[0];
   var text=c&&c.content&&c.content.parts?c.content.parts.map(function(p){return p.text||''}).join(''):'';
-  if(!text)throw {code:'invalid_json',message:'empty'};
+  if(!text)throw {code:'invalid_json',message:'빈 응답 (종료 사유: '+(c&&c.finishReason||(j.promptFeedback&&j.promptFeedback.blockReason)||'알 수 없음')+')'};
   return {text:text,truncated:c&&c.finishReason==='MAX_TOKENS',modelTierApplied:'gemini:'+(g.model||GEM_MODEL)};
 }
 async function ask(prompt,tier){
