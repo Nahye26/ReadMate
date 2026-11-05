@@ -1,0 +1,28 @@
+{
+  "meta": {
+    "run_id": "pilot-001-opus",
+    "source": "claude-chat",
+    "model": "Claude Opus 5.5",
+    "condition": null,
+    "paper_id": null,
+    "note": "v0.4-chat 파일럿 로그(조건 A/B 도입 전). 호환 검사만 적용됨."
+  },
+  "log": {
+    "prompt_version": "v0.4-chat",
+    "model": "Claude Opus 5.5",
+    "reading_type": "맥락형",
+    "missions_done": "3/3",
+    "missions_unresolved": [],
+    "answered_without_hint": 2,
+    "answered_with_hint": 1,
+    "support_path": [2, 2, 1],
+    "question_path": ["literal", "literal", "inferential"],
+    "recall_done": true,
+    "recall_prediction": 0.625,
+    "recall_actual": 0.667,
+    "calibration": "비슷",
+    "self_corrections": [],
+    "reading_load": 3,
+    "exit_reason": null
+  }
+}

@@ -1,0 +1,13 @@
+# 기록-재생 평가: 저장된 세션 로그(runs/*.json)를 그대로 되돌려 보내는 echo 제공자로 검사한다.
+# 모델 호출이 없으므로 API 키가 필요 없다.
+#   실행: cd eval && npx promptfoo@latest eval -c promptfooconfig.yaml --no-cache
+#   결과 보기: npx promptfoo@latest view
+description: ReadMate 세션 로그 검증 (기록-재생)
+
+prompts:
+  - '{{log_json}}'
+
+providers:
+  - echo
+
+tests: file://load_runs.js

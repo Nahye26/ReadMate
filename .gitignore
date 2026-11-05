@@ -1,0 +1,20 @@
+# 비밀값과 로컬 환경
+.env
+.env.*
+!.env.example
+supabase/.env
+supabase/.temp/
+supabase/functions/.env
+
+# 의존성·빌드 산출물
+node_modules/
+
+# promptfoo 로컬 출력
+eval/output/
+eval/.promptfoo/
+.promptfoo/
+promptfoo-errors.log
+
+# OS·에디터
+.DS_Store
+*.swp

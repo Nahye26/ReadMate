@@ -1,0 +1,28 @@
+{
+  "meta": {
+    "run_id": "pilot-002-sonnet",
+    "source": "claude-chat",
+    "model": "Claude Sonnet 5.5",
+    "condition": null,
+    "paper_id": null,
+    "note": "v0.4-chat 파일럿 로그(조건 A/B 도입 전). 호환 검사만 적용됨."
+  },
+  "log": {
+    "prompt_version": "v0.4-chat",
+    "model": "Claude Sonnet 5.5",
+    "reading_type": "맥락형",
+    "missions_done": "2/3",
+    "missions_unresolved": [2],
+    "answered_without_hint": 1,
+    "answered_with_hint": 1,
+    "support_path": [2, 1, 2],
+    "question_path": ["literal", "inferential", "literal"],
+    "recall_done": true,
+    "recall_prediction": 0.625,
+    "recall_actual": 0.5,
+    "calibration": "비슷",
+    "self_corrections": [],
+    "reading_load": 2,
+    "exit_reason": null
+  }
+}
