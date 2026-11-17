@@ -1,18 +1,56 @@
-// 임베딩: Supabase Edge Runtime 내장 모델(gte-small, 384차원). 외부 API 키와 비용이 없다.
-// 주의: gte-small은 영어 중심 모델이다. 한국어 자료가 중심이 되면 다국어 모델로 바꾸고
-// chunks.embedding 의 차원과 match_chunks 의 인자 차원을 함께 바꾸는 마이그레이션이 필요하다. (docs/DESIGN.md 8절)
+// 임베딩: Gemini 임베딩 API(gemini-embedding-001)를 384차원으로 줄여 쓴다.
+// 내장 모델(gte-small)은 Edge Function의 CPU 시간 한도("CPU Time exceeded")에 걸려 PDF 업로드가 실패해서 서버 밖으로 옮겼다.
+// 차원을 384로 맞춰 chunks.embedding / match_chunks 마이그레이션 없이 쓴다. GEMINI_API_KEY 를 그대로 쓴다.
+// 주의: 모델이 달라 벡터 공간이 다르다. gte-small로 저장된 자료는 다시 올려야 검색이 맞는다.
 export const EMBEDDING_DIM = 384;
+const MODEL = () => Deno.env.get('GEMINI_EMBED_MODEL') || 'gemini-embedding-001';
 
-let session: any;
-function getSession() {
-  // deno-lint-ignore no-explicit-any
-  session ??= new (globalThis as any).Supabase.ai.Session('gte-small');
-  return session;
+export type EmbedTask = 'RETRIEVAL_DOCUMENT' | 'RETRIEVAL_QUERY';
+
+function normalize(v: number[]): number[] {
+  // 차원을 줄인 벡터는 길이가 1이 아니므로 직접 정규화한다.
+  const n = Math.sqrt(v.reduce((s, x) => s + x * x, 0)) || 1;
+  return v.map((x) => x / n);
 }
 
-export async function embed(text: string): Promise<number[]> {
-  const v = await getSession().run(text, { mean_pool: true, normalize: true });
-  return Array.from(v as ArrayLike<number>);
+async function call(texts: string[], task: EmbedTask): Promise<number[][]> {
+  const key = Deno.env.get('GEMINI_API_KEY');
+  if (!key) throw new Error('GEMINI_API_KEY 비밀값이 필요합니다');
+  const model = MODEL();
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:batchEmbedContents`;
+  const body = JSON.stringify({
+    requests: texts.map((t) => ({
+      model: `models/${model}`,
+      content: { parts: [{ text: t }] },
+      taskType: task,
+      outputDimensionality: EMBEDDING_DIM,
+    })),
+  });
+  let last = '';
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', 'x-goog-api-key': key }, body });
+    if (res.ok) {
+      const data = await res.json();
+      const out = (data.embeddings ?? []).map((e: { values: number[] }) => normalize(e.values));
+      if (out.length !== texts.length) throw new Error('임베딩 응답 개수가 맞지 않습니다');
+      return out;
+    }
+    last = `${res.status} ${(await res.text()).slice(0, 200)}`;
+    if (res.status !== 429 && res.status < 500) break; // 재시도해도 소용없는 오류
+    await new Promise((r) => setTimeout(r, 800 * (attempt + 1)));
+  }
+  throw new Error(`임베딩 API 오류: ${last}`);
+}
+
+// 한 번에 최대 100개(API 한도). 호출 쪽은 이미 30개 이하로 나눠 보낸다.
+export async function embedMany(texts: string[], task: EmbedTask = 'RETRIEVAL_DOCUMENT'): Promise<number[][]> {
+  const out: number[][] = [];
+  for (let i = 0; i < texts.length; i += 100) out.push(...(await call(texts.slice(i, i + 100), task)));
+  return out;
+}
+
+export async function embed(text: string, task: EmbedTask = 'RETRIEVAL_DOCUMENT'): Promise<number[]> {
+  return (await call([text], task))[0];
 }
 
 // pgvector는 '[0.1,0.2,...]' 문자열 리터럴을 받는다.

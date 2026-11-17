@@ -51,7 +51,7 @@ async function questionSetFor(
   // 후보는 검색 결과 그대로다. 앞뒤 청크는 계획 단계에서 보여 주지 않는다(A 기준 입력).
   const { data: hits, error: hitErr } = await db.rpc('match_chunks', {
     p_source: a.sourceId,
-    p_query: toVector(await embed(a.assignment)),
+    p_query: toVector(await embed(a.assignment, 'RETRIEVAL_QUERY')),
     p_k: TOP_K,
   });
   if (hitErr || !hits?.length) throw new PlanError(500, 'retrieval_failed', hitErr?.message);
