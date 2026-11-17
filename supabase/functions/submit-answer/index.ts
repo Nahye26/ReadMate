@@ -1,6 +1,6 @@
 // POST /submit-answer
 // 입력: { session_id, mission_idx, action: 'answer' | 'hint', qtype, answer?, evidence? }
-//   evidence: 학생이 원문에서 눌러 고른 근거 문장 번호(근거 범위 안의 1부터 번호, 최대 5개). 선택 사항이며 판정에는 쓰지 않고 기록만 한다(로그의 evidence_cited, 결과표의 근거 문장 수).
+//   evidence: 학생이 원문에서 눌러 고른 근거 문장 번호(화면에 보인 앞·핵심·뒤 문단 전체에 이어 붙인 1부터 번호, 최대 5개). 선택 사항이며 판정에는 쓰지 않고 기록만 한다(로그의 evidence_cited, 결과표의 근거 문장 수).
 //   answer: 학생 답변 제출. 복붙이면 다시 쓰게 하고, 아니면 판정(pass/partial/fail)한다.
 //   hint:   학생이 막혀서 요청했을 때만. 서버가 자동으로 주지 않는다. 한 번에 한 단계씩 1 → 2 → 3.
 // 규칙(프롬프트 v0.5 1-5, 1-6절):
@@ -91,8 +91,15 @@ Deno.serve(async (req) => {
   if (!coreRow) return json({ error: 'chunk_missing' }, 500);
   const core: Chunk = { id: coreRow.id, sec: coreRow.sec, s: coreRow.sentences, t: (coreRow.sentences as string[]).join(' ') };
   // 근거 범위 밖의 번호, 중복, 6번째 이후는 버린다. 선택은 비어 있어도 된다.
+  // 화면은 앞 문단·핵심 문단·뒤 문단의 문장에 이어서 번호를 붙이고 구분 없이 고르게 한다. 그래서 상한은 보여 준 문단 전체의 문장 수다.
+  const ctxIds = ((mission.context_ids as string[]) ?? []).filter((id) => id !== core.id);
+  let shownSentences = core.s.length;
+  if (ctxIds.length) {
+    const { data: ctxRows } = await db.from('chunks').select('sentences').eq('source_id', ses.source_id).in('id', ctxIds);
+    shownSentences += (ctxRows ?? []).reduce((n, r) => n + ((r.sentences as string[])?.length ?? 0), 0);
+  }
   const evidence: number[] = [...new Set<number>((body?.evidence ?? []).map((n: unknown) => Math.round(Number(n))))]
-    .filter((n) => n >= 1 && n <= core.s.length).sort((a, b) => a - b).slice(0, 5);
+    .filter((n) => n >= 1 && n <= shownSentences).sort((a, b) => a - b).slice(0, 5);
   const pick = basisPick(basis, picked, core.s.length); // 근거 범위: excerpt면 고른 문장, chunk면 핵심 청크 전체
   const byId = { [core.id]: core };
   const coreView = { sentences: core.s.slice(pick[1] - 1, pick[2]), from: pick[1] };

@@ -41,13 +41,10 @@ label.lbl{display:block;font-weight:600;margin:20px 0 8px}
 .work{display:grid;grid-template-columns:minmax(0,1fr) 500px;gap:24px;max-width:1376px;margin:0 auto;align-items:start}
 .reader{background:var(--white);border:1px solid var(--line);border-radius:14px;padding:32px 40px}
 .reader .src{font-size:13px;color:var(--muted);margin-bottom:18px}
-.reader .ctx{color:var(--muted);margin:0 0 20px}.reader .ctx small{display:block;font-size:12px;margin-bottom:2px}
-.core{border-left:4px solid var(--accent);padding-left:18px;margin:0 0 20px}
-.core .tag{margin-bottom:10px}
+.reader .para{margin:0 0 20px}
 .sent{display:flex;gap:10px;padding:4px 6px;border-radius:8px;margin:2px -6px;cursor:pointer}
 .sent:hover{background:var(--line)}
 .sent .n{flex:none;width:18px;color:var(--muted);font-size:12px;padding-top:4px}
-.sent.focus .t{background:var(--mark)}
 .sent.picked{outline:2px solid var(--accent)}
 .sent.hinted{box-shadow:inset 3px 0 0 var(--accentText)}
 .sent .t{flex:1}

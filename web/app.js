@@ -236,11 +236,10 @@ function planScreen() {
     <p style="color:var(--sub)">시작 전에 확인하세요. 마음에 들지 않으면 다시 만들 수 있어요.</p>
     <div style="margin-top:24px">${ms.map((m, i) => {
       const core = m.excerpts.find((e) => e.role === 'core');
-      const around = m.text_units - 1;
       return `${i ? '<div class="conn"></div>' : ''}<div class="step"><div class="no">${i + 1}</div><div class="body">
         <div class="row"><h2>${esc(reqTitle(i))}</h2><span class="fill"></span><span class="tag">약 ${m.mins}분</span></div>
-        <p>${esc(secLabel(core.sec))} · 핵심 문단${around ? `과 앞뒤 ${around}문단` : ''}</p>
-        <p>핵심 문장을 읽고 근거 문장을 고르며 질문에 답해요.</p></div></div>`;
+        <p>${esc(secLabel(core.sec))} · ${m.text_units}문단</p>
+        <p>문단을 읽고 근거 문장을 고르며 질문에 답해요.</p></div></div>`;
     }).join('')}<div class="conn"></div><div class="step"><div class="no">·</div><div class="body">
       <div class="row"><h2>마무리</h2><span class="fill"></span><span class="tag">약 3분</span></div>
       <p>읽은 범위만 정리하고, 떠올릴 수 있는 정도를 예측해 봐요.</p></div></div></div>
@@ -262,19 +261,22 @@ function beginMission(i, support) {
 }
 const variant = () => { const m = S.plan.missions[S.mi]; return m.variants.find((v) => v.qtype === S.qtype) || m.variants[0]; };
 
+// 앞 문단·핵심 문단·뒤 문단을 구분 없이 하나의 글로 보여 주고, 문장 번호는 전체에 이어서 붙인다.
+// (핵심 문장만 읽는 일을 막으려고 핵심 표시·흐린 글씨·강조를 두지 않는다.) 힌트가 가리키는 문장만 학생이 요청했을 때 표시한다.
+function readerLayout() {
+  const m = S.plan.missions[S.mi];
+  let off = 0;
+  // 조건 A(실험)는 핵심 문장 일부만 보여 주므로 원문 안의 시작 번호(e.from)를 반영한다.
+  return m.excerpts.map((e) => { const o = off + ((e.from || 1) - 1); off += e.sentences.length; return { e, off: o }; });
+}
 function readerHtml() {
   const m = S.plan.missions[S.mi];
   const core = m.excerpts.find((e) => e.role === 'core');
-  const label = { before: '앞 문단', after: '뒤 문단' };
-  return m.excerpts.map((e) => {
-    if (e.role !== 'core') return `<div class="ctx"><small>${label[e.role]}</small>${esc(e.text)}</div>`;
-    const [f, t] = e.focus || [e.from, e.from + e.sentences.length - 1];
-    return `<div class="core"><span class="tag accent">핵심 발췌</span>${e.sentences.map((s, k) => {
-      const n = e.from + k;
-      const cls = ['sent', n >= f && n <= t ? 'focus' : '', S.ui.evidence.includes(n) ? 'picked' : '', S.ui.hintSents.includes(n) ? 'hinted' : ''].join(' ');
-      return `<div class="${cls}" data-n="${n}" role="button" tabindex="0" aria-pressed="${S.ui.evidence.includes(n)}"><span class="n">${n}</span><span class="t">${esc(s)}</span>${S.ui.hintSents.includes(n) ? '<span class="tag">힌트</span>' : ''}</div>`;
-    }).join('')}</div>`;
-  }).join('').replace(/^/, `<div class="src">원문 · ${esc(secLabel(core.sec))}</div>`);
+  return `<div class="src">원문 · ${esc(secLabel(core.sec))}</div>` + readerLayout().map(({ e, off }) => `<div class="para">${e.sentences.map((s, k) => {
+    const n = off + k + 1;
+    const cls = ['sent', S.ui.evidence.includes(n) ? 'picked' : '', S.ui.hintSents.includes(n) ? 'hinted' : ''].join(' ');
+    return `<div class="${cls}" data-n="${n}" role="button" tabindex="0" aria-pressed="${S.ui.evidence.includes(n)}"><span class="n">${n}</span><span class="t">${esc(s)}</span>${S.ui.hintSents.includes(n) ? '<span class="tag">힌트</span>' : ''}</div>`;
+  }).join('')}</div>`).join('');
 }
 
 function workScreen() {
@@ -344,8 +346,8 @@ async function getHint() {
     S.rec[S.mi].hint = h.hint_level;
     u.hints.push(h); u.error = null;
     if (h.quote) { // 위치 힌트: 해당 문장을 원문에서 표시한다
-      const core = S.plan.missions[S.mi].excerpts.find((e) => e.role === 'core');
-      core.sentences.forEach((s, k) => { if (h.quote.includes(s)) u.hintSents.push(core.from + k); });
+      const lay = readerLayout().find((x) => x.e.role === 'core');
+      lay.e.sentences.forEach((s, k) => { if (h.quote.includes(s)) u.hintSents.push(lay.off + k + 1); });
     }
   } catch (e) { u.error = e.code === 'hints_exhausted' ? { message: '힌트를 모두 사용했어요.' } : e; }
   workScreen();
