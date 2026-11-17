@@ -47,3 +47,66 @@ export function buildPlanPrompt(opts: { assignment: string; candidates: Chunk[];
     '{"qtype":"inferential","question":"...","cue":"...","frame":"...","key_points":["...","..."]}]}],"flow":["p1-1"]}'
   );
 }
+
+/* ---------- 답변 판정과 힌트 (submit-answer) ---------- */
+
+export const QTYPE_LABEL = { literal: '이해', inferential: '추론', evaluative: '평가' } as const;
+
+const numbered = (sentences: string[], from: number) => sentences.map((s, i) => `(${from + i}) ${s}`).join(' ');
+const keyLines = (keys: string[]) =>
+  keys.length ? keys.map((k) => `- ${k}`).join('\n') : '(없음: 질문이 요구한 핵심으로 판단)';
+
+// 판정은 조건(A/B)과 무관하게 핵심 발췌와 key_points만으로 한다(프롬프트 v0.5: A와 B에서 보완 규칙을 다르게 적용하지 않는다).
+// 조건 B에서만 앞뒤 맥락을 따로 보여 주되, 판정에는 쓰지 않고 로그의 context_used 판단에만 쓴다.
+export function buildJudgePrompt(o: {
+  req: string;
+  qtype: keyof typeof QTYPE_LABEL;
+  question: string;
+  keys: string[];
+  core: { sentences: string[]; from: number };
+  context?: string; // 조건 B의 앞뒤 청크 텍스트
+  answer: string;
+  revision: boolean;
+}) {
+  return (
+    RULES +
+    '학생이 읽기 미션에 답했습니다. 평가하세요.\n' +
+    `과제 요구: ${o.req}\n\n` +
+    `[핵심 발췌] 문장 번호가 붙어 있습니다.\n${numbered(o.core.sentences, o.core.from)}\n\n` +
+    (o.context ? `[앞뒤 맥락: 판정 기준이 아닙니다. used_context 판단에만 씁니다]\n${o.context}\n\n` : '') +
+    `[질문] (${QTYPE_LABEL[o.qtype]}) ${o.question}\n\n` +
+    `[핵심 요소: 판정 기준이며 학생에게 공개하지 않음]\n${keyLines(o.keys)}\n\n` +
+    `[학생 답변] (${o.revision ? '보완한 답' : '첫 답'})\n${o.answer}\n\n` +
+    '판정: 핵심 요소를 모두 자기 말로 담았으면 "pass", 일부만 담았으면 "partial", 틀리거나 빠졌으면 "fail". ' +
+    '판정은 핵심 발췌와 핵심 요소만으로 하고, 앞뒤 맥락에만 있는 내용은 반영하지 않습니다. 근거를 안 썼다는 이유만으로 pass를 깎지 않습니다.\n' +
+    '- praise: 학생이 잘 이해한 부분을 구체적으로 한 문장. 없으면 빈 문자열.\n' +
+    '- gap: pass가 아닐 때만. 빠졌거나 근거가 약한 부분을 한 가지, 한 문장으로. 정답이나 핵심 요소 문장을 그대로 쓰지 않습니다.\n' +
+    '- recheck: pass가 아닐 때만. 다시 확인하면 좋을 핵심 발췌의 문장 번호 1~3개(배열).\n' +
+    '- evidence_cited: 학생이 답에서 원문의 표현·문장·위치를 근거로 들었는가(true/false).\n' +
+    '- used_context: 앞뒤 맥락이 주어진 경우에만, 학생의 답이 그 맥락의 내용을 활용했는가. 주어지지 않았으면 false.\n\n' +
+    'JSON만 출력: {"verdict":"pass|partial|fail","praise":"","gap":"","recheck":[1],"evidence_cited":false,"used_context":false}'
+  );
+}
+
+// 힌트 사다리(프롬프트 v0.5 1-5): 1단계 볼 관점, 2단계 위치 + 짧은 인용(인용문은 서버가 원문에서 꺼낸다), 3단계 대비 구조 설명.
+// 어느 단계에서도 정답 문장을 직접 쓰지 않는다.
+export function buildHintPrompt(o: {
+  level: 1 | 2 | 3;
+  req: string;
+  question: string;
+  keys: string[];
+  core: { sentences: string[]; from: number };
+}) {
+  const task = {
+    1: '1단계 힌트입니다. 학생이 어떤 관점으로 발췌를 볼지만 한두 문장으로 알려 주세요. 예: "두 사례에서 학생들의 반응이 어떻게 다른지 비교해 보세요." 답이나 핵심 요소의 내용은 말하지 않습니다.\nJSON만 출력: {"text":"..."}',
+    2: '2단계 힌트입니다. 질문에 답하려면 다시 읽어야 할 문장을 1~2개 고르세요. 문장 번호만 고르고 문장을 옮겨 쓰지 않습니다.\nJSON만 출력: {"sentences":[2]}',
+    3: '3단계 힌트입니다. 발췌 안의 두 부분이 어떻게 대비되거나 이어지는지, 그 구조나 연결 방식을 두세 문장으로 설명하세요. 질문의 정답 문장은 학생이 직접 말하게 두고, 핵심 요소를 그대로 쓰지 않습니다.\nJSON만 출력: {"text":"..."}',
+  }[o.level];
+  return (
+    RULES +
+    '학생이 막혀서 힌트를 요청했습니다.\n' +
+    `과제 요구: ${o.req}\n\n[핵심 발췌]\n${numbered(o.core.sentences, o.core.from)}\n\n` +
+    `[질문] ${o.question}\n\n[핵심 요소: 학생에게 공개하지 않음]\n${keyLines(o.keys)}\n\n` +
+    task
+  );
+}

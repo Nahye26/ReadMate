@@ -5,7 +5,7 @@ import { createRequire } from 'node:module';
 import {
   buildChunks, resolvePick, validateQuote, isCopy, cleanPlan, nextSupport, calibrate,
   summarize, EXPERIMENT_FLOW, DEFAULT_FLOW, contextIds, resolveExcerpts, estimateMins, normalizeAssignment,
-  CONFIG, MAX_TEXT_UNITS,
+  CONFIG, MAX_TEXT_UNITS, MAX_HINT, missionState, currentMission, answerOutcome, leaksKey, sentenceNums, pickQtype, supportBefore,
 } from './core.ts';
 
 const require = createRequire(import.meta.url);
@@ -122,12 +122,112 @@ test('읽기 시간·과제 안내문 키', () => {
   assert.strictEqual(normalizeAssignment('  두 문단\n  요약해  서 쓰세요 '), '두 문단 요약해 서 쓰세요');
 });
 
+const T = (mission_idx: number, kind: string, payload: object) => ({ mission_idx, kind, payload });
+
+test('미션 상태: 힌트는 최고 단계, 보완은 답변 횟수로 따로 센다 (복붙은 세지 않음)', () => {
+  assert.deepStrictEqual(missionState([], 0), { qtype: null, hintLevel: 0, attempts: 0, closed: null });
+  const turns = [
+    T(0, 'hint', { qtype: 'literal', level: 1 }),
+    T(0, 'answer', { qtype: 'literal', copy: true, outcome: 'rewrite' }),
+    T(0, 'answer', { qtype: 'literal', stage: 'first', verdict: 'partial', outcome: 'revise' }),
+    T(0, 'hint', { qtype: 'literal', level: 2 }),
+    T(1, 'hint', { qtype: 'inferential', level: 3 }), // 다른 미션은 섞이지 않는다
+  ];
+  assert.deepStrictEqual(missionState(turns, 0), { qtype: 'literal', hintLevel: 2, attempts: 1, closed: null });
+  const closed = [...turns, T(0, 'answer', { qtype: 'literal', stage: 'revision', outcome: 'passed' })];
+  assert.strictEqual(missionState(closed, 0).closed, 'passed');
+  assert.strictEqual(missionState(closed, 0).attempts, 2);
+  assert.strictEqual(MAX_HINT, 3);
+});
+
+test('진행 순서: 닫히지 않은 첫 미션이 현재 미션', () => {
+  assert.strictEqual(currentMission([], 3), 0);
+  const t0 = [T(0, 'answer', { qtype: 'literal', outcome: 'passed' })];
+  assert.strictEqual(currentMission(t0, 3), 1);
+  const t01 = [...t0, T(1, 'answer', { qtype: 'literal', outcome: 'revise' })];
+  assert.strictEqual(currentMission(t01, 3), 1); // 보완 요청만으로는 닫히지 않는다
+  const all = [0, 1, 2].map((i) => T(i, 'answer', { qtype: 'literal', outcome: i === 1 ? 'unresolved' : 'passed' }));
+  assert.strictEqual(currentMission(all, 3), null);
+});
+
+test('보완 1회: 첫 답이 충분하면 보완 없음, 부족하면 한 번, 보완 뒤에도 부족하면 미해결', () => {
+  assert.strictEqual(answerOutcome(0, 'pass'), 'passed');
+  assert.strictEqual(answerOutcome(0, 'partial'), 'revise');
+  assert.strictEqual(answerOutcome(0, 'fail'), 'revise');
+  assert.strictEqual(answerOutcome(1, 'pass'), 'passed');
+  assert.strictEqual(answerOutcome(1, 'partial'), 'unresolved'); // 두 번째 보완은 요구하지 않는다
+  assert.strictEqual(answerOutcome(1, 'fail'), 'unresolved');
+});
+
+test('정답 유출 방지와 문장 번호 정리', () => {
+  const keys = ['저자는 점수 상승을 성공으로 보지 않는다'];
+  assert.strictEqual(leaksKey('저자는 점수 상승을 성공으로 보지 않는다고 했어요.', keys), true);
+  assert.strictEqual(leaksKey('저자는 점수 상승을, 성공으로 보지 않는다', keys), true); // 구두점 무시
+  assert.strictEqual(leaksKey('두 결과가 어떻게 다른지 비교해 보세요.', keys), false);
+  assert.strictEqual(leaksKey('짧은', ['짧은']), false); // 너무 짧은 기준은 오탐이 많아 보지 않는다
+  const pick: [string, number, number] = ['c', 2, 4];
+  assert.deepStrictEqual(sentenceNums(pick, [4, 9, 3, 3, 1], 2), [3, 4]); // 범위 밖·중복 제거, 최대 2개
+  assert.deepStrictEqual(sentenceNums(pick, 'x', 2), [2, 3]); // 유효한 번호가 없으면 발췌 앞쪽
+  assert.deepStrictEqual(sentenceNums(pick, [], 3), [2, 3, 4]);
+});
+
 test('안내 수준·깊이: 기본 모드는 수행에 따라 변하고, 실험 모드는 고정된다', () => {
   assert.deepStrictEqual(nextSupport({ sup: 2, depth: 0 }, { hints: 0, cueAsked: false }, DEFAULT_FLOW), { sup: 1, depth: 1 });
   assert.deepStrictEqual(nextSupport({ sup: 1, depth: 1 }, { hints: 2, cueAsked: false }, DEFAULT_FLOW), { sup: 2, depth: 0 });
   assert.deepStrictEqual(nextSupport({ sup: 2, depth: 2 }, { hints: 1, cueAsked: false }, DEFAULT_FLOW), { sup: 2, depth: 2 });
   assert.deepStrictEqual(nextSupport({ sup: 2, depth: 0 }, { hints: 0, cueAsked: false }, EXPERIMENT_FLOW), { sup: 2, depth: 0 });
   assert.deepStrictEqual(nextSupport({ sup: 2, depth: 1 }, { hints: 3, cueAsked: true }, EXPERIMENT_FLOW), { sup: 2, depth: 1 });
+});
+
+test('도움 정도: 보완을 받은 미션은 "조금" — 안내를 줄이거나 깊게 하지 않는다', () => {
+  const start = { sup: 1, depth: 1 };
+  // 힌트 없이 보완만 받음: 없음이 아니므로 그대로
+  assert.deepStrictEqual(nextSupport(start, { hints: 0, cueAsked: false, revised: true }, DEFAULT_FLOW), start);
+  // 보완 없이 힌트도 없음: 줄이고 깊게
+  assert.deepStrictEqual(nextSupport(start, { hints: 0, cueAsked: false, revised: false }, DEFAULT_FLOW), { sup: 0, depth: 2 });
+  assert.deepStrictEqual(nextSupport(start, { hints: 0, cueAsked: false }, DEFAULT_FLOW), { sup: 0, depth: 2 }); // revised 생략 = 보완 없음
+  // 보완 + 힌트 2단계: 많이 (힌트 기준이 우선)
+  assert.deepStrictEqual(nextSupport(start, { hints: 2, cueAsked: false, revised: true }, DEFAULT_FLOW), { sup: 2, depth: 0 });
+  // 미해결(보완 뒤에도 실패): 힌트가 0이어도 "많이" — 안내를 늘리고 질문을 쉽게
+  assert.deepStrictEqual(nextSupport(start, { hints: 0, cueAsked: false, revised: true, unresolved: true }, DEFAULT_FLOW), { sup: 2, depth: 0 });
+  assert.deepStrictEqual(nextSupport({ sup: 0, depth: 2 }, { hints: 1, cueAsked: false, revised: true, unresolved: true }, DEFAULT_FLOW), { sup: 1, depth: 1 });
+  // 실험 모드에서는 어떤 경우에도 고정
+  assert.deepStrictEqual(nextSupport(start, { hints: 3, cueAsked: true, revised: true, unresolved: true }, EXPERIMENT_FLOW), start);
+});
+
+test('질문 유형 고르기: 깊이에 가장 가까운 유형, 같은 거리면 깊은 쪽, 마지막 미션은 최소 추론', () => {
+  const all = ['literal', 'inferential', 'evaluative'] as const;
+  const two = ['literal', 'inferential'] as const;
+  assert.strictEqual(pickQtype([...all], 0, { adaptDepth: true, last: false }), 'literal');
+  assert.strictEqual(pickQtype([...all], 2, { adaptDepth: true, last: false }), 'evaluative');
+  assert.strictEqual(pickQtype([...two], 2, { adaptDepth: true, last: false }), 'inferential'); // 평가가 없으면 가까운 추론
+  assert.strictEqual(pickQtype([...all], 0, { adaptDepth: true, last: true }), 'inferential'); // 마지막 미션 최소 추론
+  assert.strictEqual(pickQtype([...all], 0, { adaptDepth: false, last: true }), 'inferential'); // 고정 모드는 깊이 1
+  assert.strictEqual(pickQtype(['literal', 'evaluative'], 1, { adaptDepth: true, last: false }), 'evaluative'); // 동거리 → 깊은 쪽
+});
+
+test('미션 시작 시 안내 수준·깊이: 앞선 미션 기록에서 다시 계산한다', () => {
+  // 시작은 안내 2, 깊이 0
+  assert.deepStrictEqual(supportBefore([], 0, DEFAULT_FLOW), { sup: 2, depth: 0 });
+  // 미션 1을 도움 없이 → 안내 1, 깊이 1
+  const h1 = [T(0, 'answer', { qtype: 'literal', outcome: 'passed' })];
+  assert.deepStrictEqual(supportBefore(h1, 1, DEFAULT_FLOW), { sup: 1, depth: 1 });
+  // 미션 1은 보완만 받고 통과(시도 2회) → 그대로
+  const h2 = [T(0, 'answer', { qtype: 'literal', outcome: 'revise' }), T(0, 'answer', { qtype: 'literal', outcome: 'passed' })];
+  assert.deepStrictEqual(supportBefore(h2, 1, DEFAULT_FLOW), { sup: 2, depth: 0 });
+  // 미션 1 힌트 2단계 + 통과 → 늘릴 수 없는 상태(2)라 안내 2 유지, 깊이 0 유지
+  const h3 = [T(0, 'hint', { qtype: 'literal', level: 2 }), T(0, 'answer', { qtype: 'literal', outcome: 'passed' })];
+  assert.deepStrictEqual(supportBefore(h3, 1, DEFAULT_FLOW), { sup: 2, depth: 0 });
+  // 미션 1이 미해결(보완 뒤 실패) → 많이. 시작 수준이 최대(2)라 안내는 그대로, 깊이는 0 아래로 내려가지 않는다
+  const h4 = [T(0, 'answer', { qtype: 'literal', outcome: 'revise' }), T(0, 'answer', { qtype: 'literal', outcome: 'unresolved' })];
+  assert.deepStrictEqual(supportBefore(h4, 1, DEFAULT_FLOW), { sup: 2, depth: 0 });
+  // 먼저 도움 없이 두 미션을 풀어 안내 0·깊이 2까지 간 뒤 미해결이면 안내 +1, 깊이 −1
+  const two = [T(0, 'answer', { qtype: 'literal', outcome: 'passed' }), T(1, 'answer', { qtype: 'literal', outcome: 'passed' })];
+  assert.deepStrictEqual(supportBefore(two, 2, DEFAULT_FLOW), { sup: 0, depth: 2 });
+  const afterFail = [...two, T(2, 'answer', { qtype: 'literal', outcome: 'revise' }), T(2, 'answer', { qtype: 'literal', outcome: 'unresolved' })];
+  assert.deepStrictEqual(supportBefore(afterFail, 3, DEFAULT_FLOW), { sup: 1, depth: 1 });
+  // 실험 모드는 변하지 않는다
+  assert.deepStrictEqual(supportBefore(h1, 1, EXPERIMENT_FLOW), { sup: 2, depth: 0 });
 });
 
 test('보정 판정: 파일럿 로그 두 건은 모두 비슷', () => {
