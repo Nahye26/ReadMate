@@ -110,3 +110,24 @@ export function buildHintPrompt(o: {
     task
   );
 }
+
+// 인출 확인(프롬프트 v0.5 1-7): 학생이 원문을 보지 않고 쓴 글을 핵심 요소와 견준다.
+// 채점 범위는 핵심 발췌의 핵심 요소뿐이다. 조건 B의 앞뒤 청크나 발췌에 없는 내용은 요구하지 않는다.
+// 떠올린 핵심은 번호로 받아 서버가 센다. 빠진 핵심 문장은 서버가 keys에서 꺼낸다.
+export function buildRecallPrompt(o: {
+  question: string;
+  keys: string[];
+  core: { sentences: string[]; from: number };
+  answer: string;
+}) {
+  return (
+    RULES +
+    '학생이 원문을 보지 않고 기억해서 썼습니다. 핵심 요소 기준으로 확인하세요.\n\n' +
+    `[핵심 발췌]\n${numbered(o.core.sentences, o.core.from)}\n\n` +
+    `[핵심 요소: 번호 순서대로 판정 기준]\n${o.keys.map((k, i) => `${i + 1}. ${k}`).join('\n')}\n\n` +
+    `[질문]\n${o.question}\n\n[학생이 기억해서 쓴 답]\n${o.answer}\n\n` +
+    '학생이 자기 말로라도 담은 핵심 요소의 번호를 모두 고르세요. 핵심 요소에 없는 내용을 요구하거나 감점하지 않습니다.\n' +
+    '- comment: 학습자를 평가하는 말투가 아니라 한 문장 안내로. 빠진 핵심의 문장을 그대로 쓰지 않습니다.\n' +
+    'JSON만 출력: {"recalled":[1],"comment":"..."}'
+  );
+}
