@@ -27,7 +27,7 @@ async function call(texts: string[], task: EmbedTask): Promise<number[][]> {
     })),
   });
   let last = '';
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < 6; attempt++) {
     const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', 'x-goog-api-key': key }, body });
     if (res.ok) {
       const data = await res.json();
@@ -36,8 +36,8 @@ async function call(texts: string[], task: EmbedTask): Promise<number[][]> {
       return out;
     }
     last = `${res.status} ${(await res.text()).slice(0, 200)}`;
-    if (res.status !== 429 && res.status < 500) break; // 재시도해도 소용없는 오류
-    await new Promise((r) => setTimeout(r, 800 * (attempt + 1)));
+    if (res.status !== 429 && res.status < 500) break; // 503 "high demand" 같은 일시 과부하는 간격을 늘려 다시 시도 // 재시도해도 소용없는 오류
+    await new Promise((r) => setTimeout(r, 1500 * 2 ** attempt));
   }
   throw new Error(`임베딩 API 오류: ${last}`);
 }
