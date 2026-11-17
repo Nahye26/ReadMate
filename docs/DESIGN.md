@@ -129,7 +129,7 @@ flowchart LR
 | `submit`, 힌트, `failMission` | `submit-answer` (데모와 달리 힌트는 요청 시에만, 보완은 1회) | 완료 (타입 검사만, 실행 미검증) |
 | `startRecall`, `submitRecall` | `recall` (예측 → 통합 쓰기, 핵심 번호로 채점. 원문 비교·고쳐 쓰기는 뺌) | 완료 (타입 검사만, 실행 미검증) |
 | `summary`의 저장 | `finish-session` | 완료 (타입 검사만, 실행 미검증) |
-| 기록 패널 | 클라이언트 | M2 |
+| 기록 패널 | `web/` (결과 화면의 세션 기록) | 완료 (가짜 서버로 흐름만 확인) |
 | `claimStage`, `outlineStep`(과제 지원) | 별도 함수 | M3 이후, 범위 결정 필요 |
 
 ## 6. 실험 모드 (A/B 비교)

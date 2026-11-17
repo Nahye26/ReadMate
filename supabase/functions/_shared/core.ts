@@ -65,7 +65,7 @@ export function resolvePick(byId: Record<string, Chunk>, [id, a, b]: Pick) {
   if (!c) throw new Error('unknown chunk_id ' + id);
   const ss = c.s.slice(a - 1, b);
   const ok = ss.length === b - a + 1 && ss.every((s) => c.t.includes(s));
-  return { id: c.id, sec: c.sec, text: ss.join(' '), range: a === b ? `문장 ${a}` : `문장 ${a}–${b}`, ok };
+  return { id: c.id, sec: c.sec, text: ss.join(' '), range: a === b ? `문장 ${a}` : `문장 ${a}–${b}`, ok, from: a, sentences: ss }; // from·sentences: 화면에서 문장 번호를 붙이고 근거 문장을 고르게 하는 데 쓴다
 }
 
 export function validateQuote(byId: Record<string, Chunk>, id: string, quote: string) {
