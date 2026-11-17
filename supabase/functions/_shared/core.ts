@@ -353,7 +353,7 @@ export function supportBefore(turns: TurnRec[], idx: number, flow: FlowOpts) {
 //   recall {stage:'predict', jol} → recall {stage:'answer', per:[{m, recalled, total}], recalled, total, actual}
 //   recall {stage:'skip'} 은 어느 단계에서든 가능하다.
 // 범위는 통과한 미션의 key_points(근거 범위 안의 내용)로 한정한다. 미해결 미션은 이미 핵심을 보여 주었으므로 제외한다.
-// 조건 B의 앞뒤 청크 내용은 채점하지 않는다(프롬프트 v0.5 1-7).
+// 조건 B의 앞뒤 청크 내용은 채점하지 않는다(프롬프트 v0.5 2절).
 
 export type RecallStage = 'none' | 'predicted' | 'answered' | 'skipped';
 export type RecallPer = { m: number; recalled: number; total: number };
