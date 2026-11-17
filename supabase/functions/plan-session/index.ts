@@ -1,13 +1,14 @@
 // POST /plan-session
 // 입력: { source_id, assignment, condition: 'A'|'B', experiment?, fast?, researcher?, paper_id?, consent_research?, consent_answers? }
 // 동작:
-//   1) 질문 세트 확보: (자료, 과제 안내문)마다 A 기준 계획을 한 번만 만들어 question_sets에 저장하고, 이후에는 그대로 다시 쓴다.
-//      계획 = 과제 안내문 임베딩으로 찾은 상위 청크 → LLM → 서버 검증(cleanPlan). 미션마다 핵심 청크 하나 안의 1~3문장.
+//   1) 질문 세트 확보: 계획 = 과제 안내문 임베딩으로 찾은 상위 청크 → LLM → 서버 검증(cleanPlan). 미션마다 핵심 청크 하나 안의 1~3문장.
+//      - experiment = true (효과성 검증): (자료, 과제 안내문)마다 한 번만 만들어 question_sets에 저장하고 A/B가 같은 세트를 쓴다.
+//      - experiment = false (사용성 테스트): 세션마다 새로 만든다. 저장하지 않는다(question_set_id = null).
 //   2) 조건 B: 같은 계획의 핵심 청크에 같은 절의 앞·뒤 청크를 붙인다(contextIds). 질문·판정 기준은 A와 같다.
 //   3) sessions / missions / mission_secrets 저장
 // 출력: 학생에게 보여 줄 미션(발췌 원문, 질문 변형). 판정 기준(key_points)은 응답에 포함하지 않는다.
 import {
-  cleanPlan, contextIds, DEFAULT_FLOW, estimateMins, EXPERIMENT_FLOW, normalizeAssignment, resolveExcerpts,
+  CONFIG, cleanPlan, contextIds, DEFAULT_FLOW, estimateMins, EXPERIMENT_FLOW, normalizeAssignment, pickQtype, resolveExcerpts,
   type Chunk, type ChunkRef, type Condition, type PlanData,
 } from '../_shared/core.ts';
 import { embed, toVector } from '../_shared/embed.ts';
@@ -32,18 +33,20 @@ const sha256 = async (s: string) =>
 
 const toChunk = (r: Row): Chunk => ({ id: r.id, sec: r.sec, s: r.sentences, t: r.sentences.join(' ') });
 
-// 질문 세트가 있으면 그대로 쓰고, 없으면 A 기준으로 한 번 만들어 저장한다.
+// 질문 세트를 만든다. fixed(효과성 검증)면 저장된 세트를 우선 쓰고 없으면 만들어 저장한다. 아니면 매번 새로 만들고 저장하지 않는다.
 async function questionSetFor(
   db: Db,
-  a: { sourceId: string; assignment: string; fast: boolean; paperId: string | null },
-): Promise<{ id: string; plan: PlanData }> {
+  a: { sourceId: string; assignment: string; fast: boolean; paperId: string | null; fixed: boolean },
+): Promise<{ id: string | null; plan: PlanData }> {
   // fast(미션 2개)는 세트 모양이 다르므로 키에 넣어 정식 세트와 섞이지 않게 한다.
   const hash = await sha256(normalizeAssignment(a.assignment) + (a.fast ? '|fast' : ''));
   const find = () =>
     db.from('question_sets').select('id, plan').eq('source_id', a.sourceId).eq('assignment_hash', hash).maybeSingle();
 
-  const found = await find();
-  if (found.data) return found.data as { id: string; plan: PlanData };
+  if (a.fixed) {
+    const found = await find();
+    if (found.data) return found.data as { id: string; plan: PlanData };
+  }
 
   // 후보는 검색 결과 그대로다. 앞뒤 청크는 계획 단계에서 보여 주지 않는다(A 기준 입력).
   const { data: hits, error: hitErr } = await db.rpc('match_chunks', {
@@ -62,6 +65,8 @@ async function questionSetFor(
     const code = e instanceof LlmError ? e.code : 'invalid_plan';
     throw new PlanError(code === 'rate_limited' ? 429 : 502, code, (e as Error).message);
   }
+
+  if (!a.fixed) return { id: null, plan };
 
   const ins = await db
     .from('question_sets')
@@ -107,13 +112,14 @@ Deno.serve(async (req) => {
   if (!src || (src.owner !== user.id && !src.shared)) return json({ error: 'not_found' }, 404);
 
   // 1) 질문 세트 (A 기준, 논문·과제별로 한 번만 생성)
-  let qs: { id: string; plan: PlanData };
+  let qs: { id: string | null; plan: PlanData };
   try {
     qs = await questionSetFor(db, {
       sourceId: source_id,
       assignment,
       fast: !!fast,
       paperId: typeof paper_id === 'string' ? paper_id.slice(0, 80) : null,
+      fixed: !!experiment,
     });
   } catch (e) {
     if (e instanceof PlanError) return json({ error: e.code, message: e.message }, e.status);
@@ -167,7 +173,7 @@ Deno.serve(async (req) => {
       consent_research: !!consent_research,
       consent_answers: !!consent_answers,
       assignment: consent_answers ? assignment : null, // 답변 저장 동의가 없으면 과제 안내문도 남기지 않는다
-      config: flow,
+      config: { ...flow, reqs: plan.reqs }, // submit-answer가 과제 요구 항목을 읽는다(세트를 저장하지 않는 세션도 있다)
     })
     .select('id')
     .single();
@@ -197,6 +203,12 @@ Deno.serve(async (req) => {
     session_id: session.id,
     reqs: plan.reqs,
     flow,
+    // 첫 미션의 안내 수준·깊이·질문 유형. 이후 미션은 submit-answer가 미션이 끝날 때마다 next_support로 돌려준다.
+    start_support: {
+      sup: CONFIG.supStart,
+      depth: 0,
+      qtype: pickQtype(plan.missions[0].vars.map((v) => v.qtype), 0, { adaptDepth: flow.adaptDepth, last: plan.missions.length === 1 }),
+    },
     missions: plan.missions.map((m, idx) => ({
       idx,
       req: m.req,

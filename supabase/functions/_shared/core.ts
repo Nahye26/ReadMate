@@ -22,6 +22,7 @@ export const CONFIG = {
   ctxBefore: 1, // 조건 B: 핵심 청크 앞에 붙이는 청크 수
   ctxAfter: 1, // 조건 B: 핵심 청크 뒤에 붙이는 청크 수
   supStart: 2,
+  lastMinDepth: 1, // 마지막 미션은 최소 추론(1) 깊이로 올린다(적응 모드)
 };
 export const MAX_TEXT_UNITS = 1 + CONFIG.ctxBefore + CONFIG.ctxAfter; // 미션당 제공 청크 수 상한 (조건 B 기준 3)
 
@@ -205,6 +206,73 @@ export function estimateMins(chars: number, charsPerMin = 400, answerMin = 2): n
 // 과제 안내문을 질문 세트의 키로 쓰기 위해 공백만 정리한다.
 export const normalizeAssignment = (s: string) => s.replace(/\s+/g, ' ').trim();
 
+/* ---------- 미션 진행: 힌트 사다리와 보완 1회 (submit-answer) ---------- */
+// 프롬프트 v0.5 1-5, 1-6절.
+//  - 힌트: 학습자가 요청할 때만, 한 번에 한 단계씩 1(볼 관점) → 2(위치 + 짧은 인용) → 3(대비 구조 설명). 자동으로 주지 않는다.
+//  - 보완: 첫 답이 판정 기준에 못 미치면 미션당 한 번만 요청한다. 보완 뒤에도 부족하면 핵심 요점을 보여 주고 미해결로 넘어간다.
+//  - 힌트 횟수와 보완 횟수는 따로 센다.
+
+export const MAX_HINT = 3;
+export type Verdict = 'pass' | 'partial' | 'fail';
+export type AnswerOutcome = 'passed' | 'revise' | 'unresolved';
+export type TurnRec = { mission_idx: number | null; kind: string; payload: any };
+export type MissionState = {
+  qtype: QType | null;
+  hintLevel: number; // 사용한 최고 힌트 단계 (0~3). 로그의 hint_level
+  attempts: number; // 복붙이 아닌 답변 제출 수. 0이면 다음 답은 첫 답, 1이면 보완 답
+  closed: 'passed' | 'unresolved' | null;
+};
+
+// turns 기록에서 한 미션의 상태를 되살린다. 상태를 따로 저장하지 않으므로 기록과 어긋날 수 없다.
+export function missionState(turns: TurnRec[], idx: number): MissionState {
+  const st: MissionState = { qtype: null, hintLevel: 0, attempts: 0, closed: null };
+  for (const t of turns) {
+    if (t.mission_idx !== idx) continue;
+    const p = t.payload ?? {};
+    if (QTYPES.includes(p.qtype)) st.qtype ??= p.qtype;
+    if (t.kind === 'hint') st.hintLevel = Math.max(st.hintLevel, Number(p.level) || 0);
+    if (t.kind === 'answer') {
+      if (!p.copy) st.attempts++;
+      if (p.outcome === 'passed' || p.outcome === 'unresolved') st.closed = p.outcome;
+    }
+  }
+  return st;
+}
+
+// 미션은 순서대로만 진행한다. 아직 닫히지 않은 첫 미션의 번호(0부터)를 돌려주고, 모두 끝났으면 null.
+export function currentMission(turns: TurnRec[], total: number): number | null {
+  for (let i = 0; i < total; i++) if (!missionState(turns, i).closed) return i;
+  return null;
+}
+
+// 판정 → 결과. pass면 통과, 그렇지 않으면 첫 답은 보완 요청, 보완 답은 미해결(요점 공개 후 넘어감).
+export function answerOutcome(attemptsBefore: number, verdict: Verdict): AnswerOutcome {
+  if (verdict === 'pass') return 'passed';
+  return attemptsBefore === 0 ? 'revise' : 'unresolved';
+}
+
+const squash = (s: string) => s.replace(/[\s.,?!'"“”]/g, '');
+
+// 힌트·피드백 문장이 판정 기준(key_points)을 그대로 담고 있으면 true. 정답 유출 방지용 마지막 안전장치다.
+export function leaksKey(text: string, keys: string[]): boolean {
+  const t = squash(text);
+  return keys.some((k) => squash(k).length >= 6 && t.includes(squash(k)));
+}
+
+// LLM이 고른 문장 번호를 핵심 발췌 범위 안으로 정리한다. 유효한 번호가 없으면 발췌의 앞쪽 max개를 쓴다.
+export function sentenceNums(pick: Pick, nums: unknown, max: number): number[] {
+  const [, from, to] = pick;
+  const ok = (Array.isArray(nums) ? nums : [])
+    .map((n) => Math.round(Number(n)))
+    .filter((n, i, a) => n >= from && n <= to && a.indexOf(n) === i)
+    .sort((x, y) => x - y)
+    .slice(0, max);
+  if (ok.length) return ok;
+  const out: number[] = [];
+  for (let n = from; n <= to && out.length < max; n++) out.push(n);
+  return out;
+}
+
 /* ---------- 안내 수준(스캐폴딩 페이딩)과 질문 깊이 ---------- */
 
 export type FlowOpts = {
@@ -216,27 +284,60 @@ export type FlowOpts = {
 export const EXPERIMENT_FLOW: FlowOpts = { fade: false, adaptDepth: false };
 export const DEFAULT_FLOW: FlowOpts = { fade: true, adaptDepth: true };
 
+// 도움 정도: 없음(힌트 0 + 안내 요청 없음 + 보완 없음) / 조금(힌트 1단계, 안내 요청, 보완 받음) / 많이(힌트 2단계 이상, 미해결).
+// 2026-11-17 결정: 보완을 받은 미션은 "조금"(안내를 줄이거나 질문을 깊게 하지 않는다), 미해결로 끝난 미션은 "많이".
+// 힌트가 2단계 이상이면 보완과 무관하게 "많이".
 export function nextSupport(
   prev: { sup: number; depth: number },
-  used: { hints: number; cueAsked: boolean },
+  used: { hints: number; cueAsked: boolean; revised?: boolean; unresolved?: boolean },
   flow: FlowOpts = DEFAULT_FLOW,
   supStart = CONFIG.supStart,
 ) {
   let sup = prev.sup;
   let depth = prev.depth;
-  const noHelp = used.hints === 0 && !used.cueAsked;
+  const noHelp = used.hints === 0 && !used.cueAsked && !used.revised && !used.unresolved;
+  const heavy = used.hints >= 2 || !!used.unresolved;
   if (flow.fade) {
     if (noHelp) {
       if (sup > 0) sup -= 1;
-    } else if (used.hints >= 2) {
+    } else if (heavy) {
       if (sup < supStart) sup += 1;
     }
   }
   if (flow.adaptDepth) {
     if (noHelp) depth = Math.min(2, depth + 1);
-    else if (used.hints >= 2) depth = Math.max(0, depth - 1);
+    else if (heavy) depth = Math.max(0, depth - 1);
   }
   return { sup, depth };
+}
+
+// 질문 유형 고르기: 깊이(0 이해 / 1 추론 / 2 평가)에 가장 가까운 유형, 같은 거리면 더 깊은 쪽.
+// 적응 모드가 아니면 깊이를 1(추론)로 고정하고, 적응 모드의 마지막 미션은 최소 lastMinDepth로 올린다. (index.html pickVariant 이식)
+export function pickQtype(available: QType[], depth: number, opts: { adaptDepth: boolean; last: boolean }): QType {
+  let d = opts.adaptDepth ? depth : 1;
+  if (opts.adaptDepth && opts.last) d = Math.max(d, CONFIG.lastMinDepth);
+  let best = available[0];
+  for (const q of available) {
+    const dq = Math.abs(QTYPES.indexOf(q) - d);
+    const db = Math.abs(QTYPES.indexOf(best) - d);
+    if (dq < db || (dq === db && QTYPES.indexOf(q) > QTYPES.indexOf(best))) best = q;
+  }
+  return best;
+}
+
+// idx번 미션을 보여 줄 때의 안내 수준·깊이. 앞선 미션들의 기록(turns)에서 처음부터 다시 계산하므로 서버가 기준이다.
+// 안내 요청(cueAsked)은 서버에 기록이 없어 아직 반영하지 않는다.
+export function supportBefore(turns: TurnRec[], idx: number, flow: FlowOpts) {
+  let cur = { sup: CONFIG.supStart, depth: 0 };
+  for (let i = 0; i < idx; i++) {
+    const st = missionState(turns, i);
+    cur = nextSupport(
+      cur,
+      { hints: st.hintLevel, cueAsked: false, revised: st.attempts >= 2, unresolved: st.closed === 'unresolved' },
+      flow,
+    );
+  }
+  return cur;
 }
 
 /* ---------- 회상 보정 ---------- */

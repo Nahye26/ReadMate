@@ -56,12 +56,26 @@ flowchart LR
 1. **자료 올리기**: 브라우저가 PDF에서 섹션별 텍스트를 추출해 `ingest-source`에 보낸다.
    서버가 문단 단위(문장 3개 또는 300자)로 청킹하고, 청크별 임베딩을 계산해 `sources`·`chunks`에 저장한다.
 2. **읽기 지도 만들기**: `plan-session`은 **A 기준으로 계획을 한 번만** 만들고, B는 그 계획에 앞뒤 청크만 더한다.
-   - 질문 세트: (자료, 과제 안내문)마다 `question_sets`에 저장된 계획이 있으면 그대로 쓴다. 없으면 과제 안내문을 임베딩해 상위 16개 청크를 찾고,
-     LLM이 요구 항목·미션(핵심 청크 하나 안의 1~3문장)·질문 변형을 만들며, 서버(`cleanPlan`)가 검증해 저장한다. 이후 A/B 세션은 모두 이 세트를 쓴다.
+   - 질문 세트: 과제 안내문을 임베딩해 상위 16개 청크를 찾고, LLM이 요구 항목·미션(핵심 청크 하나 안의 1~3문장)·질문 변형을 만들며, 서버(`cleanPlan`)가 검증한다.
+     **실험 모드(효과성 검증)**에서는 (자료, 과제 안내문)마다 한 번만 만들어 `question_sets`에 저장하고 A/B 세션이 모두 같은 세트를 쓴다.
+     **그 밖(사용성 테스트)**에서는 세션마다 새로 만들고 저장하지 않는다. 과제 요구 항목은 `sessions.config.reqs`에 남긴다.
    - 조건 B: 미션마다 핵심 청크의 같은 절 안 앞 1개·뒤 1개를 붙인다(`contextIds`). 질문·판정 기준은 A와 같다.
    - 세션마다 `missions`(학생에게 보임, 제공 청크 `context_ids` 포함)와 `mission_secrets`(판정 기준)로 나눠 저장한다.
-3. **미션 진행** (M2): 답변 제출 시 서버가 복붙을 감지하고(`isCopy`), 판정 기준으로 LLM이 평가한다. 힌트는 단계별로 서버가 내려 준다.
-   미션이 끝나면 `nextSupport`로 다음 안내 수준·질문 깊이를 정한다. (실험 모드에서는 고정)
+3. **미션 진행** (`submit-answer`, 프롬프트 v0.5 1-5·1-6절): 미션은 순서대로만 진행한다.
+   - 힌트는 학생이 요청할 때만 준다(`action: 'hint'`). 자동으로 주지 않는다. 한 번에 한 단계씩 1(볼 관점) → 2(위치 + 원문 인용 1~2문장, 인용문은 서버가 원문에서 꺼냄) → 3(대비 구조 설명). 정답 문장은 쓰지 않고, 판정 기준을 그대로 담은 힌트는 서버가 걸러 대체 문구로 바꾼다.
+   - 답을 내면(`action: 'answer'`) 서버가 복붙을 감지하고(`isCopy`, 핵심 발췌와 비교), 아니면 LLM이 key_points로 pass/partial/fail을 판정한다.
+   - 보완은 미션당 1회. 첫 답이 pass가 아니면 맞은 부분 + 빠진 한 가지 + 다시 확인할 위치를 안내한다(정답은 안 알려 줌). 보완 답도 pass가 아니면 핵심 요점을 보여 주고 미해결로 넘어간다. 첫 답이 pass면 보완을 요청하지 않는다. 힌트 횟수와 보완 횟수는 따로 센다. 복붙으로 다시 쓰게 한 것은 보완으로 세지 않는다.
+   - 판정·복붙 감지는 조건(A/B)과 무관하게 **핵심 발췌 + key_points**만으로 한다. 조건 B에서만 앞뒤 맥락을 LLM에 따로 보여 주지만 `used_context`(로그의 context_used) 판단에만 쓴다.
+   - 상태는 따로 저장하지 않고 `turns` 기록에서 되살린다(`missionState`). 각 답변 기록에 `evidence_cited`, `used_context`, 판정, 결과가 들어간다. 답변 원문은 동의한 경우에만 남는다.
+   - 미션이 끝나면(통과 또는 미해결) 응답의 `next_support`로 다음 미션의 안내 수준·질문 깊이·질문 유형을 돌려준다. 첫 미션의 값은 `plan-session` 응답의 `start_support`다. 서버가 앞선 미션 기록에서 처음부터 다시 계산한다(`supportBefore`). 실험 모드에서는 고정이다.
+
+     | 도움 정도 | 해당 | 다음 미션 |
+     |---|---|---|
+     | 없음 | 힌트 0, 안내 요청 없음, 보완 없음 | 안내 −1(최소 0), 깊이 +1(최대 2) |
+     | 조금 | 힌트 1단계, 안내 요청, **보완 받음** | 그대로 |
+     | 많이 | 힌트 2단계 이상, **미해결** | 안내 +1(최대 2), 깊이 −1(최소 0) |
+
+     시작은 안내 수준 2(읽기 전 안내 + 답변 틀), 깊이 0(이해). 질문 유형은 깊이에 가장 가까운 유형(같은 거리면 깊은 쪽)이고, 적응 모드의 마지막 미션은 최소 추론이다. 적응하지 않는 모드는 깊이 1로 고정한다. 안내 요청(`cueAsked`)은 서버에 기록이 없어 아직 반영하지 않는다.
 4. **인출·예측** (M2): 예측은 4지선다(0.125/0.375/0.625/0.875). 서버가 떠올린 핵심 수를 집계하고 `calibrate`로 판정한다.
 5. **종료** (M2): `summarize`가 v0.5 로그를 만들어 `sessions.summary`에 저장한다. 동의가 없으면 과제 안내문을 비운다.
 
@@ -99,7 +113,7 @@ flowchart LR
 | `prefilter` (LLM으로 후보 추리기) | `plan-session`의 임베딩 검색 | 완료 |
 | `startLive`, `planLive` | `plan-session` (질문 세트 생성·재사용 포함) | 완료 (타입 검사만, 실행 미검증) |
 | 업로드·청킹(`pdfRead`, `textChunks`) | 추출은 클라이언트, 청킹·저장은 `ingest-source` | 완료 (미검증) |
-| `submit`, 힌트, `failMission` | `submit-answer` | M2 |
+| `submit`, 힌트, `failMission` | `submit-answer` (데모와 달리 힌트는 요청 시에만, 보완은 1회) | 완료 (타입 검사만, 실행 미검증) |
 | `startRecall`, `submitRecall` | `recall` | M2 |
 | `summary`의 저장, 기록 패널 | `finish-session` + 클라이언트 | M2 |
 | `claimStage`, `outlineStep`(과제 지원) | 별도 함수 | M3 이후, 범위 결정 필요 |
@@ -115,7 +129,7 @@ flowchart LR
 **반영된 결정 (2026-11-17)**
 
 1. 문항 생성 **(2026-11-17 결정)**: 사용성 테스트에서는 참가자마다 과제·자료가 달라 질문을 고정하지 않는다. 세션마다 AI가 생성하고 서버가 검증한다(현재 `plan-session` 그대로). 사용성 테스트에서는 B(핵심 + 앞뒤 1개)만 쓰고 A/B 비교는 하지 않는다. 이후 효과성 검증 단계(프롬프트 행동 비교)에서 같은 논문·같은 질문으로 A/B를 비교할 때만 질문 세트를 고정한다(A 기준 1회 생성 후 저장·재사용, `QUESTION_SET`). 그때를 위해 계획을 저장·재사용할 수 있는 DB 구조(`question_sets`)는 유지한다. 이해도 효과는 사람 대상 후속 과제로 둔다.
-   - 구현 상태: 이 브랜치의 `plan-session`은 아직 항상 `question_sets`에 저장·재사용한다. 실험 모드에서만 고정하고 그 밖에는 세션마다 생성하도록 바꾸는 것은 후속 변경이다.
+   - 구현: `plan-session`은 `experiment`(실험 모드)일 때만 질문 세트를 `question_sets`에 저장·재사용하고, 그 밖(사용성 테스트)에서는 세션마다 새로 생성하며 저장하지 않는다. 과제 요구 항목은 `sessions.config.reqs`에 남긴다.
    - 세트를 고정할 때(효과성 검증): 사람이 쓰지 않는다. AI가 (자료, 과제 안내문)마다 **A 기준 입력**으로 1회 생성해 `question_sets`에 저장하고, A/B 세션이 같은 세트를 쓴다. 동시에 첫 요청이 둘 와도 unique 제약으로 세트는 하나만 남는다. 팀은 검토만 한다(체크 항목: A 텍스트만으로 답할 수 있는가, 판정 기준이 핵심 청크 안에 있는가). 검토는 SQL 편집기로 `question_sets.plan`을 읽어서 한다. 아직 "검토 완료" 표시나 수정 도구는 없다.
    - 같은 논문을 여러 참가자가 읽을 때 세트를 논문 단위로 유지하려면 자료를 공유해야 한다. 연구자가 SQL 편집기에서 `update sources set shared = true where id = '...'`로 표시한다. (참가자 각자가 같은 PDF를 올리면 세트가 참가자별로 따로 생긴다.)
    - 세트는 `(source_id, 과제 안내문 해시)`로 찾는다. 과제 안내문을 바꾸면 새 세트가 만들어진다. `fast`(미션 2개)는 별도 세트다.
@@ -162,7 +176,7 @@ npx supabase login
 npx supabase link --project-ref gcqpbjyjpiryviulbbyq
 npx supabase db push                                   # 마이그레이션 적용 (init + question_sets 두 파일)
 npx supabase secrets set GEMINI_API_KEY=... GEMINI_MODEL=...   # 값은 터미널에서 직접 입력. 커밋 금지
-npx supabase functions deploy ingest-source plan-session
+npx supabase functions deploy ingest-source plan-session submit-answer
 ```
 
 - Auth 설정에서 **Anonymous sign-ins**를 켜야 한다.
@@ -172,7 +186,7 @@ npx supabase functions deploy ingest-source plan-session
 
 | 대상 | 방법 | 결과 |
 |---|---|---|
-| 핵심 로직 | `node --test supabase/functions/_shared/core.test.ts` | 13건 통과 (A 기준 계획 검증, B 확장, 발췌 해석, 요약 로그가 eval 검사기 통과) |
+| 핵심 로직 | `node --test supabase/functions/_shared/core.test.ts` | 17건 통과 (A 기준 계획 검증, B 확장, 발췌 해석, 미션 상태·보완·힌트 규칙, 요약 로그가 eval 검사기 통과) |
 | 로그 검사기 | `cd eval && node --test test/check_log.test.js` | 16건 통과 |
 | 기록-재생 평가 | `cd eval && npx promptfoo@latest eval -c promptfooconfig.yaml --no-cache` | 파일럿 2건 통과, 잘못된 로그는 FAIL 확인 |
 | Edge Function 타입 | `deno check` | 통과 |

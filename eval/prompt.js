@@ -11,20 +11,19 @@ const SLOTS = [
   ['{학습자의 과제 설명}', 'TASK'],
   ['{읽기 자료 전문 또는 장/절 단위 텍스트}', 'SOURCE'],
   ['{A 또는 B}', 'CONDITION'],
-  ['{미션 3개의 질문과 순서, 유형. 미리 고정된 세트}', 'QUESTION_SET'],
-  ['{미션당 제공 텍스트의 상한. 단위와 값은 시행 전에 정함}', 'MAX_TEXT_UNITS'],
+  ['{미션 3개의 질문과 순서, 유형. 사용성 테스트 단계에서는 세션마다 AI가 생성(서버 검증), 효과성 검증 단계에서만 고정}', 'QUESTION_SET'],
   ['{off 기본값. on이면 A/B 양쪽 모두 같은 형태로 제공}', 'FLOW_MAP'],
 ];
 
 const DEFAULTS = {
-  MAX_TEXT_UNITS: '미션당 청크 3개 이하. 조건 A는 핵심 청크 안 1~3문장, 조건 B는 핵심 청크 + 앞 1개 + 뒤 1개(같은 절 안에서만). 실험 중 예외 없음.',
   FLOW_MAP: 'off',
 };
 
 function buildSystemPrompt(vars) {
   const raw = fs.readFileSync(path.join(__dirname, 'prompts', 'readmate_prompt_v0.5.md'), 'utf8');
-  const s = raw.indexOf(START);
-  const e = raw.indexOf(END);
+  // 사용법 설명(3행)에도 같은 문구가 있으므로, 줄 처음에서 시작하는 마커만 찾는다.
+  const s = raw.search(new RegExp('^' + START + '$', 'm'));
+  const e = raw.search(new RegExp('^' + END + '$', 'm'));
   if (s < 0 || e < 0) throw new Error('프롬프트 시작/끝 마커를 찾지 못했습니다.');
   let body = raw.slice(s + START.length, e).trim();
 
