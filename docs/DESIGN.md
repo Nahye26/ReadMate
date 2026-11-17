@@ -55,9 +55,11 @@ flowchart LR
 
 1. **자료 올리기**: 브라우저가 PDF에서 섹션별 텍스트를 추출해 `ingest-source`에 보낸다.
    서버가 문단 단위(문장 3개 또는 300자)로 청킹하고, 청크별 임베딩을 계산해 `sources`·`chunks`에 저장한다.
-2. **읽기 지도 만들기**: `plan-session`이 과제 안내문을 임베딩해 상위 16개 청크를 찾는다.
-   조건 B는 앞뒤 청크(`idx ± 1`)를 후보에 더한다. LLM이 요구 항목·미션·질문 변형을 만들고, 서버(`cleanPlan`)가 검증한다.
-   검증을 통과한 계획만 `missions`(학생에게 보임)와 `mission_secrets`(판정 기준)로 나눠 저장한다.
+2. **읽기 지도 만들기**: `plan-session`은 **A 기준으로 계획을 한 번만** 만들고, B는 그 계획에 앞뒤 청크만 더한다.
+   - 질문 세트: (자료, 과제 안내문)마다 `question_sets`에 저장된 계획이 있으면 그대로 쓴다. 없으면 과제 안내문을 임베딩해 상위 16개 청크를 찾고,
+     LLM이 요구 항목·미션(핵심 청크 하나 안의 1~3문장)·질문 변형을 만들며, 서버(`cleanPlan`)가 검증해 저장한다. 이후 A/B 세션은 모두 이 세트를 쓴다.
+   - 조건 B: 미션마다 핵심 청크의 같은 절 안 앞 1개·뒤 1개를 붙인다(`contextIds`). 질문·판정 기준은 A와 같다.
+   - 세션마다 `missions`(학생에게 보임, 제공 청크 `context_ids` 포함)와 `mission_secrets`(판정 기준)로 나눠 저장한다.
 3. **미션 진행** (M2): 답변 제출 시 서버가 복붙을 감지하고(`isCopy`), 판정 기준으로 LLM이 평가한다. 힌트는 단계별로 서버가 내려 준다.
    미션이 끝나면 `nextSupport`로 다음 안내 수준·질문 깊이를 정한다. (실험 모드에서는 고정)
 4. **인출·예측** (M2): 예측은 4지선다(0.125/0.375/0.625/0.875). 서버가 떠올린 핵심 수를 집계하고 `calibrate`로 판정한다.
@@ -65,14 +67,15 @@ flowchart LR
 
 ## 4. 데이터 모델
 
-마이그레이션: `supabase/migrations/20261105000000_init.sql`
+마이그레이션: `supabase/migrations/20261105000000_init.sql`, `20261117000000_question_sets.sql`(질문 세트·공유 자료·제공 청크)
 
 | 테이블 | 용도 | 클라이언트 접근 |
 |---|---|---|
-| `sources` | 올린 자료(제목, 언어, 쪽수) | 본인 것만 읽기 |
+| `sources` | 올린 자료(제목, 언어, 쪽수). `shared`면 소유자가 아니어도 plan-session에서 쓸 수 있다 | 본인 것만 읽기 |
 | `chunks` | 청크, 문장 배열, 임베딩(384차원, HNSW 인덱스) | 본인 자료만 읽기 |
-| `sessions` | 조건(A/B), 실험 모드, 동의 2종, 설정, 종료 요약 | 본인 것만 읽기 |
-| `missions` | 발췌 위치(picks), 질문 변형(판정 기준 제외) | 본인 세션만 읽기 |
+| `question_sets` | 논문·과제별로 고정된 A 기준 계획(미션·질문·판정 기준). 과제 안내문은 해시만 저장 | **접근 불가** (service role 전용) |
+| `sessions` | 조건(A/B), 실험 모드, 동의 2종, 설정, 질문 세트 id, 종료 요약 | 본인 것만 읽기 |
+| `missions` | 핵심 발췌 위치(picks, A 기준), 제공 청크(`context_ids`), 질문 변형(판정 기준 제외) | 본인 세션만 읽기 |
 | `mission_secrets` | 질문 변형별 key_points | **접근 불가** (service role 전용) |
 | `turns` | 답변·힌트·인출 기록. 답변 원문은 `consent_answers`일 때만 | 본인 세션만 읽기 |
 | `events` | 서버 이벤트 로그 (데모의 `log()`에 해당) | 본인 세션만 읽기 |
@@ -86,14 +89,15 @@ flowchart LR
 |---|---|---|
 | `split`, `buildChunks` | `_shared/core.ts` | 완료·테스트 |
 | `resolve`, `validateQuote`, `isCopy` | `_shared/core.ts` | 완료·테스트 |
-| `cleanPlan` | `_shared/core.ts` (조건 A/B별 문장 상한) | 완료·테스트 |
+| `cleanPlan` | `_shared/core.ts` (A 기준: 미션당 핵심 청크 하나, 1~3문장) | 완료·테스트 |
+| 조건 B 확장(앞뒤 청크), 발췌 해석 | `_shared/core.ts` `contextIds`, `resolveExcerpts` | 완료·테스트 |
 | `fadeAfter` | `_shared/core.ts` `nextSupport` (+ `EXPERIMENT_FLOW`) | 완료·테스트 |
 | 보정 판정(`S.calib`) | `_shared/core.ts` `calibrate` (±0.25, 예측 − 실제) | 완료·테스트 |
 | `summary()` | `_shared/core.ts` `summarize` (eval 스키마와 같은 출력) | 완료·테스트 |
 | `gemCall`, `parseJson` | `_shared/llm.ts` | 완료 (호출 자체는 미검증) |
 | `RULES`, `planLive` 프롬프트 | `_shared/prompts.ts` | 완료 |
 | `prefilter` (LLM으로 후보 추리기) | `plan-session`의 임베딩 검색 | 완료 |
-| `startLive`, `planLive` | `plan-session` | 완료 (미검증) |
+| `startLive`, `planLive` | `plan-session` (질문 세트 생성·재사용 포함) | 완료 (타입 검사만, 실행 미검증) |
 | 업로드·청킹(`pdfRead`, `textChunks`) | 추출은 클라이언트, 청킹·저장은 `ingest-source` | 완료 (미검증) |
 | `submit`, 힌트, `failMission` | `submit-answer` | M2 |
 | `startRecall`, `submitRecall` | `recall` | M2 |
@@ -105,14 +109,25 @@ flowchart LR
 `sessions.experiment_mode = true`이면 다음이 적용된다.
 
 - `config`: `{ fade: false, adaptDepth: false }` → 안내 수준은 계속 2, 질문 깊이는 미션별로 고정.
-- 조건 A = 발췌형(미션당 최대 3문장), 조건 B = 맥락형(핵심 + 앞뒤 문단). 데모의 `ex`/`cx`에 대응한다.
+- 조건 A = 발췌형(핵심 청크 안 1~3문장), 조건 B = 맥락형(핵심 청크 + 같은 절의 앞 1개 + 뒤 1개). 데모의 `ex`/`cx`에 대응한다.
 - 종료 로그는 `summarize`가 만들고, `eval/checks/check_log.js`가 같은 규칙으로 검사한다. (테스트로 연결해 두었다.)
 
-**아직 정해지지 않은 것 (M3에서 결정)**
+**반영된 결정 (2026-11-17)**
 
-1. 문항 생성 **(2026-11-17 결정)**: 사용성 테스트에서는 참가자마다 과제·자료가 달라 질문을 고정하지 않는다. 세션마다 AI가 생성하고 서버가 검증한다(현재 `plan-session` 그대로). 사용성 테스트에서는 B(핵심 + 앞뒤 1개)만 쓰고 A/B 비교는 하지 않는다. 이후 효과성 검증 단계(프롬프트 행동 비교)에서 같은 논문·같은 질문으로 A/B를 비교할 때만 질문 세트를 고정한다(A 기준 1회 생성 후 저장·재사용, `QUESTION_SET`). 그때를 위해 계획을 저장·재사용할 수 있는 DB 구조는 유지한다. 이해도 효과는 사람 대상 후속 과제로 둔다.
-2. 분량 단위 **(2026-11-17 확정, 파일럿 후 조정)**: 단위는 청크. A = 핵심 청크 안 1~3문장, B = 핵심 청크 + 앞 1개 + 뒤 1개(최대 청크 3개, 약 9문장). 문장 상한 `cxSent = 8`은 폐기하고 코드(`CONFIG`)와 프롬프트 `MAX_TEXT_UNITS`를 청크 기준으로 바꿔야 한다(미반영). 근거는 배민령·이병민(2018)의 "짧은 지문 + 원문 문단 1~2개"이며 글자·단어 수 근거는 없다. 실험 중 예외(절 전체 제공)는 허용하지 않는다. 파일럿 3~4쌍에서 B의 읽기 부담이 A보다 1점 이상 높거나 미션 완료율이 떨어지면 "앞 1개만"으로 줄인다. 앱의 청크는 실제 문단이 아니므로, 업로드 시 원문 문단 경계를 살리거나 보고서에 "청크 ±1 ≈ 문단 1~2개"로 명시한다.
-3. 일반 모드(조건 없이 LLM이 읽기 유형을 판단)는 지금 `plan-session`이 지원하지 않는다. 조건(A/B)이 필수다.
+1. 문항 생성 **(2026-11-17 결정)**: 사용성 테스트에서는 참가자마다 과제·자료가 달라 질문을 고정하지 않는다. 세션마다 AI가 생성하고 서버가 검증한다(현재 `plan-session` 그대로). 사용성 테스트에서는 B(핵심 + 앞뒤 1개)만 쓰고 A/B 비교는 하지 않는다. 이후 효과성 검증 단계(프롬프트 행동 비교)에서 같은 논문·같은 질문으로 A/B를 비교할 때만 질문 세트를 고정한다(A 기준 1회 생성 후 저장·재사용, `QUESTION_SET`). 그때를 위해 계획을 저장·재사용할 수 있는 DB 구조(`question_sets`)는 유지한다. 이해도 효과는 사람 대상 후속 과제로 둔다.
+   - 구현 상태: 이 브랜치의 `plan-session`은 아직 항상 `question_sets`에 저장·재사용한다. 실험 모드에서만 고정하고 그 밖에는 세션마다 생성하도록 바꾸는 것은 후속 변경이다.
+   - 세트를 고정할 때(효과성 검증): 사람이 쓰지 않는다. AI가 (자료, 과제 안내문)마다 **A 기준 입력**으로 1회 생성해 `question_sets`에 저장하고, A/B 세션이 같은 세트를 쓴다. 동시에 첫 요청이 둘 와도 unique 제약으로 세트는 하나만 남는다. 팀은 검토만 한다(체크 항목: A 텍스트만으로 답할 수 있는가, 판정 기준이 핵심 청크 안에 있는가). 검토는 SQL 편집기로 `question_sets.plan`을 읽어서 한다. 아직 "검토 완료" 표시나 수정 도구는 없다.
+   - 같은 논문을 여러 참가자가 읽을 때 세트를 논문 단위로 유지하려면 자료를 공유해야 한다. 연구자가 SQL 편집기에서 `update sources set shared = true where id = '...'`로 표시한다. (참가자 각자가 같은 PDF를 올리면 세트가 참가자별로 따로 생긴다.)
+   - 세트는 `(source_id, 과제 안내문 해시)`로 찾는다. 과제 안내문을 바꾸면 새 세트가 만들어진다. `fast`(미션 2개)는 별도 세트다.
+2. 분량 단위: 단위는 청크. A = 핵심 청크 안 1~3문장, B = 핵심 청크 전체 + 앞 1개 + 뒤 1개(최대 청크 3개, 약 9문장). 문장 상한 `cxSent = 8`은 폐기했고 코드(`CONFIG.coreSent`, `MAX_TEXT_UNITS`)와 eval 프롬프트 기본값을 청크 기준으로 바꿨다. 로그의 `text_units_provided`는 미션에 제공한 청크 수다(A는 1, B는 1~3).
+   - 앞뒤 청크는 **같은 절(`sec`) 안에서만** 붙인다. 절의 첫·끝 청크는 한쪽만 붙으므로 B의 일부 미션은 청크가 2개다. 절 경계를 넘으면 이어지는 논리 단위가 아니라고 보았다. 이 규칙은 문서에 없던 구현상의 판단이므로 팀이 확인해야 한다.
+   - 근거는 배민령·이병민(2018)의 "짧은 지문 + 원문 문단 1~2개"이며 글자·단어 수 근거는 없다. 실험 중 예외(절 전체 제공)는 허용하지 않는다. 파일럿에서 B의 읽기 부담이 A보다 1점 이상 높거나 미션 완료율이 떨어지면 `CONFIG.ctxAfter = 0`으로 "앞 1개만"으로 줄인다.
+   - 앱의 청크는 실제 문단이 아니므로(문장 3개 또는 300자 단위), 보고서에는 "청크 ±1 ≈ 문단 1~2개"로 명시하거나 업로드 시 원문 문단 경계를 살린다.
+
+**아직 정해지지 않은 것**
+
+1. 일반 모드(조건 없이 LLM이 읽기 유형을 판단)는 `plan-session`이 지원하지 않는다. 조건(A/B)이 필수다.
+2. B 학생에게 핵심 문장(`focus`)을 표시할지 여부(UI 결정). 서버는 B의 핵심 청크에 `focus: [from, to]`를 내려 준다.
 
 ## 7. 임베딩 설계
 
@@ -126,7 +141,8 @@ flowchart LR
 ## 8. 보안·개인정보
 
 - RLS: 모든 테이블에 켜 두고 본인 데이터 읽기 정책만 만들었다. 쓰기 정책은 없고, `anon`/`authenticated`의 쓰기 권한도 회수했다.
-- service role 함수는 RLS를 우회하므로 호출 때마다 자료 소유자를 직접 확인한다. (`plan-session`에 구현)
+- service role 함수는 RLS를 우회하므로 호출 때마다 접근 권한을 직접 확인한다: 자료 소유자이거나 `sources.shared`인 자료만 쓴다. (`plan-session`에 구현)
+- `question_sets.plan`에는 판정 기준(key_points)이 있으므로 `mission_secrets`처럼 클라이언트 접근을 전부 막았다.
 - 비밀값: `GEMINI_API_KEY`, `GEMINI_MODEL`은 `supabase secrets`로만 설정한다. 저장소에 두지 않는다. (`.gitignore`에 `.env` 포함)
 - 동의 2종: `consent_research`(횟수·점수 요약 익명 저장), `consent_answers`(답변 원문 저장). 후자가 아니면 답변 원문과 과제 안내문을 저장하지 않는다.
 - 외부 LLM 전송: 자료와 답변이 Gemini로 전송된다. **학습 조항 포함 여부를 동의서에 쓰고 IRB 담당자에게 확인**하기로 한 기존 결정이 이 구조에도 그대로 적용된다.
@@ -144,7 +160,7 @@ flowchart LR
 ```bash
 npx supabase login
 npx supabase link --project-ref gcqpbjyjpiryviulbbyq
-npx supabase db push                                   # 마이그레이션 적용
+npx supabase db push                                   # 마이그레이션 적용 (init + question_sets 두 파일)
 npx supabase secrets set GEMINI_API_KEY=... GEMINI_MODEL=...   # 값은 터미널에서 직접 입력. 커밋 금지
 npx supabase functions deploy ingest-source plan-session
 ```
@@ -156,11 +172,11 @@ npx supabase functions deploy ingest-source plan-session
 
 | 대상 | 방법 | 결과 |
 |---|---|---|
-| 핵심 로직 | `node --test supabase/functions/_shared/core.test.ts` | 9건 통과 (요약 로그가 eval 검사기 통과) |
+| 핵심 로직 | `node --test supabase/functions/_shared/core.test.ts` | 13건 통과 (A 기준 계획 검증, B 확장, 발췌 해석, 요약 로그가 eval 검사기 통과) |
 | 로그 검사기 | `cd eval && node --test test/check_log.test.js` | 16건 통과 |
 | 기록-재생 평가 | `cd eval && npx promptfoo@latest eval -c promptfooconfig.yaml --no-cache` | 파일럿 2건 통과, 잘못된 로그는 FAIL 확인 |
 | Edge Function 타입 | `deno check` | 통과 |
-| 마이그레이션 | SQL 구문 분석(pglast) | 통과 (DB 적용은 미실시) |
+| 마이그레이션 | SQL 구문 분석(pglast), 두 파일 | 통과 (DB 적용은 미실시) |
 | Edge Function 실행 | — | **미검증** (임베딩 모델, Gemini 호출, DB 쓰기는 배포 환경에서 확인 필요) |
 
 ## 12. 마일스톤
@@ -175,6 +191,6 @@ npx supabase functions deploy ingest-source plan-session
 ## 13. 열린 질문
 
 1. (결정) 사용성 테스트: 세션마다 AI 생성 + 서버 검증, B만 사용. 효과성 검증 단계에서만 `QUESTION_SET`을 AI 1회 생성 후 고정(팀은 검토만). 효과성 검증용 기각 기준은 시작 전에 적는다.
-2. (확정) 분량 상한 단위는 청크, B = 핵심 + 앞뒤 1개. 코드·프롬프트 반영만 남음. (6절)
+2. (확정·반영) 분량 상한 단위는 청크, B = 핵심 + 앞뒤 1개. (6절)
 3. 임베딩을 영어 모델로 갈지, 한국어 대응 모델로 바꿀지? (교재가 영어라면 현재 설정으로 시작 가능)
 4. 세션 로그의 `prompt_version`: 앱이 만든 로그에도 `v0.5-chat`을 쓰는 것이 맞는가, 별도 표기(`v0.5-app`)가 나은가? (현재는 eval 검사기와 맞추기 위해 `v0.5-chat`)
