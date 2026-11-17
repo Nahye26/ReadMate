@@ -9,8 +9,8 @@
 // 채점 범위는 핵심 발췌의 key_points뿐이다. 조건 B의 앞뒤 청크는 쓰지 않는다(프롬프트 v0.5 1-7, new_info_in_recall = false).
 // 상태는 turns 기록에서 되살린다(core.ts recallState).
 import {
-  calibrate, currentMission, JOL_VALUES, missionState, parseRecalled, pickRecallMission, recallState, resolvePick,
-  type Chunk, type Pick, type QType,
+  basisPick, calibrate, currentMission, JOL_VALUES, missionState, parseRecalled, pickRecallMission, recallState, resolvePick,
+  type Basis, type Chunk, type Pick, type QType,
 } from '../_shared/core.ts';
 import { authedUser, corsHeaders, json, serviceClient } from '../_shared/http.ts';
 import { askJson, LlmError } from '../_shared/llm.ts';
@@ -55,7 +55,7 @@ Deno.serve(async (req) => {
 
   const { data: ses } = await db
     .from('sessions')
-    .select('id, owner, source_id, consent_answers, started_at, finished_at')
+    .select('id, owner, source_id, consent_answers, started_at, finished_at, config')
     .eq('id', session_id)
     .maybeSingle();
   if (!ses || ses.owner !== user.id) return json({ error: 'not_found' }, 404);
@@ -128,11 +128,13 @@ Deno.serve(async (req) => {
   if (action === 'submit') {
     if (state.stage !== 'predicted' || state.jol === null) return json({ error: 'wrong_stage', stage: state.stage }, 409);
 
-    const pick = (mission.picks as Pick[])[0];
+    const basis = ((ses.config as { basis?: Basis } | null)?.basis) ?? 'excerpt';
+    const picked = (mission.picks as Pick[])[0];
     const { data: row } = await db
-      .from('chunks').select('id, sec, sentences').eq('source_id', ses.source_id).eq('id', pick[0]).maybeSingle();
+      .from('chunks').select('id, sec, sentences').eq('source_id', ses.source_id).eq('id', picked[0]).maybeSingle();
     if (!row) return json({ error: 'chunk_missing' }, 500);
     const core: Chunk = { id: row.id, sec: row.sec, s: row.sentences as string[], t: (row.sentences as string[]).join(' ') };
+    const pick = basisPick(basis, picked, core.s.length);
     const view = { sentences: core.s.slice(pick[1] - 1, pick[2]), from: pick[1] };
 
     let recalled: number[];

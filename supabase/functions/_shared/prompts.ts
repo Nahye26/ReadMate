@@ -1,7 +1,7 @@
 // 읽기 지도(계획) 프롬프트. index.html 데모(v0.4)의 RULES와 planLive 프롬프트를 서버로 옮긴 것이다.
 // 계획은 조건과 무관하게 A 기준(핵심 청크 하나 안 1~3문장)으로 한 번만 만든다. 조건 B는 서버가
 // 같은 계획에 앞뒤 청크만 붙인다(core.ts contextIds). 그래서 이 프롬프트에는 조건(A/B)이 들어가지 않는다.
-import { CONFIG, type Chunk } from './core.ts';
+import { CONFIG, type Basis, type Chunk } from './core.ts';
 
 export const RULES =
   '당신은 대학생의 과제 수행을 돕는 AI 파트너 ReadMate입니다. 과제의 완성된 답안·문단·자료 요약본을 대신 쓰지 않습니다. ' +
@@ -12,8 +12,9 @@ export const RULES =
 export const chunkText = (list: Chunk[]) =>
   list.map((c) => `[${c.id}] ` + c.s.map((s, i) => `(${i + 1}) ${s}`).join(' ')).join('\n');
 
-export function buildPlanPrompt(opts: { assignment: string; candidates: Chunk[]; fast?: boolean }) {
+export function buildPlanPrompt(opts: { assignment: string; candidates: Chunk[]; fast?: boolean; basis?: Basis }) {
   const { assignment, candidates, fast } = opts;
+  const chunkBasis = opts.basis === 'chunk';
   const nMissions = fast ? 2 : CONFIG.missions;
   const maxMissions = fast ? 2 : CONFIG.maxMissions;
   return (
@@ -28,7 +29,9 @@ export function buildPlanPrompt(opts: { assignment: string; candidates: Chunk[];
     '- picks: 미션마다 정확히 1개, 위 자료에 있는 chunk_id 하나와 그 청크 안의 문장 번호(from~to)만 사용합니다. ' +
     `from~to는 ${CONFIG.coreSent}문장 이하(1~${CONFIG.coreSent}문장)이고, 여러 청크에 걸치지 않습니다. ` +
     '앞뒤 청크는 앱이 나중에 따로 붙이므로 고르지 않습니다.\n' +
-    '- 질문과 key_points는 고른 문장만 읽고도 답하고 판정할 수 있어야 합니다. 앞뒤 내용을 읽어야만 답할 수 있는 질문은 만들지 않습니다.\n' +
+    (chunkBasis
+      ? '- 질문과 key_points는 고른 문장이 속한 청크 하나(그 청크의 모든 문장)만 읽고도 답하고 판정할 수 있어야 합니다. 다른 청크를 읽어야만 답할 수 있는 질문은 만들지 않습니다. 고른 문장(picks)은 학생이 가장 먼저 볼 핵심 대목입니다.\n'
+      : '- 질문과 key_points는 고른 문장만 읽고도 답하고 판정할 수 있어야 합니다. 앞뒤 내용을 읽어야만 답할 수 있는 질문은 만들지 않습니다.\n') +
     '- variants: 미션마다 같은 발췌에 대해 깊이가 다른 질문 변형을 만듭니다. ' +
     '"literal"(이해), "inferential"(추론: 적혀 있지 않지만 끌어낼 수 있는 원인·함의·조건 적용·문장 사이의 관계), "evaluative"(평가). ' +
     (fast

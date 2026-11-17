@@ -350,3 +350,13 @@ test('missionRecords → summarize: v0.5 로그 형식을 지킨다(실험 흐�
   assert.deepStrictEqual(s.text_units_provided, [3, 3, 3]);
   assert.strictEqual(s.recall_actual, 1);
 });
+
+test('근거 범위: 사용성 테스트(B)만 핵심 청크 전체, 효과성 검증은 고른 문장', async () => {
+  const { basisFor, basisPick } = await import('./core.ts');
+  assert.strictEqual(basisFor(false, 'B'), 'chunk');
+  assert.strictEqual(basisFor(false, 'A'), 'excerpt');
+  assert.strictEqual(basisFor(true, 'B'), 'excerpt'); // 실험 모드는 A/B가 같은 기준
+  assert.deepStrictEqual(basisPick('chunk', ['p1-1', 2, 3], 3), ['p1-1', 1, 3]);
+  assert.deepStrictEqual(basisPick('excerpt', ['p1-1', 2, 3], 3), ['p1-1', 2, 3]);
+  assert.deepStrictEqual(basisPick(undefined, ['p1-1', 2, 3], 3), ['p1-1', 2, 3]);
+});

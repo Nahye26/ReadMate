@@ -4,6 +4,12 @@
 
 export type Chunk = { id: string; sec: string; s: string[]; t: string };
 export type Pick = [chunkId: string, from: number, to: number];
+// 질문·판정·힌트·인출이 근거로 삼는 범위. excerpt: 고른 1~3문장만(A 기준, 효과성 검증). chunk: 고른 문장이 속한 핵심 청크 전체(조건 B, 사용성 테스트).
+// 앞뒤 청크는 어느 쪽이든 근거 범위가 아니다(context_used 판단에만 쓴다).
+export type Basis = 'excerpt' | 'chunk';
+export const basisPick = (basis: Basis | undefined, pick: Pick, len: number): Pick => (basis === 'chunk' ? [pick[0], 1, len] : pick);
+// 사용성 테스트(실험 모드가 아니고 조건 B)만 청크 전체를 근거로 삼는다. 효과성 검증은 A/B가 같은 세트와 같은 기준을 써야 한다.
+export const basisFor = (experiment: boolean, condition: Condition): Basis => (!experiment && condition === 'B' ? 'chunk' : 'excerpt');
 export type QType = 'literal' | 'inferential' | 'evaluative';
 export type Condition = 'A' | 'B';
 
@@ -431,7 +437,7 @@ export function missionRecords(turns: TurnRec[], missions: MissionRow[], flow: F
       hintLevel: st.hintLevel,
       unresolved: st.closed !== 'passed',
       textUnits: units,
-      contextSufficient: true, // 계획 단계에서 핵심 발췌만으로 답할 수 있는 질문만 남긴다. 따로 점검한 값은 아니다.
+      contextSufficient: true, // 계획 단계에서 근거 범위(A 기준 핵심 발췌, B 사용성 테스트는 핵심 청크) 안에서 답할 수 있는 질문만 남긴다. 따로 점검한 값은 아니다.
       contextUsed: answers.some((t) => t.payload?.used_context === true),
       evidenceCited: answers.some((t) => t.payload?.evidence_cited === true),
       activity: ACTIVITY_BY_QTYPE[st.qtype],

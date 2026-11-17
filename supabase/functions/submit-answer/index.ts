@@ -13,8 +13,8 @@
 // 클라이언트는 응답이 올 때까지 제출 버튼을 막아야 한다.
 // 판정은 조건(A/B)과 무관하게 핵심 발췌 + key_points만으로 한다. 복붙 감지도 핵심 발췌와 비교해, B의 추가 텍스트가 감지 기준을 바꾸지 않게 한다.
 import {
-  answerOutcome, currentMission, isCopy, leaksKey, MAX_HINT, missionState, pickQtype, QTYPES, resolvePick, sentenceNums,
-  supportBefore, type Chunk, type FlowOpts, type Pick, type QType, type Verdict,
+  answerOutcome, basisPick, currentMission, isCopy, leaksKey, MAX_HINT, missionState, pickQtype, QTYPES, resolvePick, sentenceNums,
+  supportBefore, type Basis, type Chunk, type FlowOpts, type Pick, type QType, type Verdict,
 } from '../_shared/core.ts';
 import { authedUser, corsHeaders, json, serviceClient } from '../_shared/http.ts';
 import { askJson, LlmError } from '../_shared/llm.ts';
@@ -80,11 +80,13 @@ Deno.serve(async (req) => {
   if (state.qtype && state.qtype !== qtype) return json({ error: 'qtype_mismatch', expected: state.qtype }, 409);
 
   // 3) 핵심 발췌 (A 기준). 판정·힌트·복붙 감지는 모두 이 텍스트를 기준으로 한다.
-  const pick = (mission.picks as Pick[])[0];
+  const basis = ((ses.config as { basis?: Basis } | null)?.basis) ?? 'excerpt';
+  const picked = (mission.picks as Pick[])[0];
   const { data: coreRow } = await db
-    .from('chunks').select('id, sec, sentences').eq('source_id', ses.source_id).eq('id', pick[0]).maybeSingle();
+    .from('chunks').select('id, sec, sentences').eq('source_id', ses.source_id).eq('id', picked[0]).maybeSingle();
   if (!coreRow) return json({ error: 'chunk_missing' }, 500);
   const core: Chunk = { id: coreRow.id, sec: coreRow.sec, s: coreRow.sentences, t: (coreRow.sentences as string[]).join(' ') };
+  const pick = basisPick(basis, picked, core.s.length); // 근거 범위: excerpt면 고른 문장, chunk면 핵심 청크 전체
   const byId = { [core.id]: core };
   const coreView = { sentences: core.s.slice(pick[1] - 1, pick[2]), from: pick[1] };
   const coreText = coreView.sentences.join(' ');
