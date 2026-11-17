@@ -42,9 +42,10 @@ Deno.serve(async (req) => {
   if (!ses || ses.owner !== user.id) return json({ error: 'not_found' }, 404);
   if (ses.finished_at) return json({ summary: ses.summary, already_finished: true });
 
-  const [{ data: missions }, { data: turns }] = await Promise.all([
+  const [{ data: missions }, { data: turns }, { data: reports }] = await Promise.all([
     db.from('missions').select('idx, context_ids').eq('session_id', session_id).order('idx'),
     db.from('turns').select('mission_idx, kind, payload').eq('session_id', session_id).order('id'),
+    db.from('events').select('data').eq('session_id', session_id).eq('type', 'question_report').order('id'),
   ]);
   const history = turns ?? [];
   const total = missions?.length ?? 0;
@@ -64,7 +65,7 @@ Deno.serve(async (req) => {
   const flow: FlowOpts = { fade: cfg.fade ?? DEFAULT_FLOW.fade, adaptDepth: cfg.adaptDepth ?? DEFAULT_FLOW.adaptDepth };
   const condition: Condition = ses.condition === 'A' ? 'A' : 'B'; // 사용성 테스트는 B만 쓴다. 조건이 없는 일반 세션은 B로 본다.
 
-  const { records, selfCorrections, boundary, recall } = missionRecords(history, missions ?? [], flow, condition);
+  const { records, selfCorrections, boundary, evidenceCounts, idxs, recall } = missionRecords(history, missions ?? [], flow, condition);
   if (!records.length) return json({ error: 'nothing_to_summarize', message: '시작한 미션이 없습니다' }, 409);
 
   const s = summarize({
@@ -83,6 +84,9 @@ Deno.serve(async (req) => {
   const summary = {
     ...s,
     ...(noRecall ? { recall_prediction: null, recall_actual: null, calibration: null, calibration_gap: null } : {}),
+    // 미션별 질문 신고 사유(없으면 빈 배열). 사용성 테스트에서 질문 품질을 볼 때 쓴다.
+    question_reports: idxs.map((i) => (reports ?? []).filter((r) => (r.data as { m?: number }).m === i + 1).map((r) => (r.data as { reason: string }).reason)),
+    evidence_count: evidenceCounts, // 미션별 학생이 고른 근거 문장 수
     context_boundary: boundary, // B에서 같은 절 경계로 앞뒤 청크가 모자란 미션(분석에서 제외 후보)
   };
 

@@ -408,6 +408,10 @@ export function parseRecalled(raw: unknown, n: number): number[] {
 
 /* ---------- 세션 요약 조립 (finish-session) ---------- */
 // R3 읽기 활동 이름. 질문 유형에서 정해 둔 대응이며, 학생이 실제로 한 활동을 판정한 값이 아니다. (연구팀 확인 필요)
+// 질문 신고 사유(Figma: '이 질문이 이상해요', '답할 수 없어요', '원문과 달라요', '너무 쉬워요')
+export const REPORT_REASONS = ['weird', 'unanswerable', 'mismatch', 'too_easy'] as const;
+export type ReportReason = (typeof REPORT_REASONS)[number];
+
 export const ACTIVITY_BY_QTYPE: Record<QType, string> = {
   literal: '근거 문장 찾기',
   inferential: '생략된 의미 추론하기',
@@ -422,6 +426,8 @@ export function missionRecords(turns: TurnRec[], missions: MissionRow[], flow: F
   const rec = recallState(turns);
   const records: MissionRecord[] = [];
   const selfCorrections: string[] = [];
+  const idxs: number[] = []; // 요약에 들어간 미션 번호(0부터)
+  const evidenceCounts: number[] = []; // 미션별로 학생이 고른 근거 문장 수(마지막 답 기준, 결과표의 '근거 문장')
   const boundary: boolean[] = []; // B에서 같은 절 경계 때문에 앞뒤 청크가 모자란 미션. 분석에서 따로 볼 수 있게 남긴다.
   for (const m of missions) {
     const st = missionState(turns, m.idx);
@@ -444,13 +450,16 @@ export function missionRecords(turns: TurnRec[], missions: MissionRow[], flow: F
       recalled,
       recallTotal,
     });
+    idxs.push(m.idx);
+    const lastEv = [...answers].reverse().find((t) => Array.isArray(t.payload?.evidence))?.payload?.evidence;
+    evidenceCounts.push(Array.isArray(lastEv) ? lastEv.length : 0);
     boundary.push(condition === 'B' && units < MAX_TEXT_UNITS);
     if (answers.some((t) => t.payload?.stage === 'revision' && t.payload?.outcome === 'passed')) {
       selfCorrections.push(`미션 ${m.idx + 1} 보완`);
     }
   }
   if (rec.stage === 'done' && rec.fixed && rec.m !== null) selfCorrections.push(`미션 ${rec.m + 1} 인출 확인`);
-  return { records, selfCorrections, boundary, recall: rec };
+  return { records, selfCorrections, boundary, evidenceCounts, idxs, recall: rec };
 }
 
 /* ---------- 회상 보정 ---------- */

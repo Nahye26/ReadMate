@@ -360,3 +360,13 @@ test('근거 범위: 사용성 테스트(B)만 핵심 청크 전체, 효과성 �
   assert.deepStrictEqual(basisPick('excerpt', ['p1-1', 2, 3], 3), ['p1-1', 2, 3]);
   assert.deepStrictEqual(basisPick(undefined, ['p1-1', 2, 3], 3), ['p1-1', 2, 3]);
 });
+
+test('missionRecords: 근거 문장 수는 마지막 답의 선택 수', () => {
+  const t = [
+    ans(0, { stage: 'first', outcome: 'revise', evidence: [1] }),
+    ans(0, { stage: 'revision', outcome: 'passed', evidence: [1, 3] }),
+    ans(1, { stage: 'first', outcome: 'passed' }),
+  ];
+  const r = missionRecords(t, [{ idx: 0, context_ids: ['a'] }, { idx: 1, context_ids: ['b'] }], DEFAULT_FLOW, 'B');
+  assert.deepStrictEqual(r.evidenceCounts, [2, 0]);
+});
