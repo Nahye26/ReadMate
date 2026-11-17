@@ -4,7 +4,8 @@ import assert from 'node:assert';
 import { createRequire } from 'node:module';
 import {
   buildChunks, resolvePick, validateQuote, isCopy, cleanPlan, nextSupport, calibrate,
-  summarize, EXPERIMENT_FLOW, DEFAULT_FLOW,
+  summarize, EXPERIMENT_FLOW, DEFAULT_FLOW, contextIds, resolveExcerpts, estimateMins, normalizeAssignment,
+  CONFIG, MAX_TEXT_UNITS,
 } from './core.ts';
 
 const require = createRequire(import.meta.url);
@@ -46,25 +47,79 @@ const plan = (picks: any[]) => ({
   ] }],
 });
 
-test('계획 검증: 조건 A는 미션당 3문장 상한, B는 더 길게 허용', () => {
+test('분량 상한은 청크 기준: A는 핵심 청크 안 3문장, B는 최대 청크 3개', () => {
+  assert.strictEqual(CONFIG.coreSent, 3);
+  assert.strictEqual(MAX_TEXT_UNITS, 3);
+  assert.strictEqual('cxSent' in CONFIG, false); // 문장 상한 8은 폐기
+});
+
+test('계획 검증: 미션마다 핵심 청크 하나, 3문장 상한, 변형은 깊이순', () => {
   const chunks = [
     { id: 'p1', sec: 's', s: ['1.', '2.', '3.', '4.', '5.', '6.'], t: '1. 2. 3. 4. 5. 6.' },
     { id: 'p2', sec: 's', s: ['a.', 'b.', 'c.'], t: 'a. b. c.' },
   ];
-  const raw = [{ chunk_id: 'p1', from: 1, to: 6 }, { chunk_id: 'p2', from: 1, to: 3 }];
-  const a = cleanPlan(plan(raw), chunks, 'A');
-  const b = cleanPlan(plan(raw), chunks, 'B');
-  const units = (p: any) => p.missions[0].pick.reduce((n: number, x: any) => n + (x[2] - x[1] + 1), 0);
-  assert.strictEqual(units(a), 3);
-  assert.strictEqual(units(b), 8);
-  assert.deepStrictEqual(a.missions[0].vars.map((v: any) => v.qtype), ['literal', 'inferential']); // 깊이순 정렬
+  // 여러 청크에 걸쳐 길게 고른 경우: 첫 청크 하나만, 3문장으로 줄인다.
+  const p = cleanPlan(plan([{ chunk_id: 'p1', from: 1, to: 6 }, { chunk_id: 'p2', from: 1, to: 3 }]), chunks);
+  assert.deepStrictEqual(p.missions[0].pick, ['p1', 1, 3]);
+  assert.deepStrictEqual(p.missions[0].vars.map((v: any) => v.qtype), ['literal', 'inferential']);
+  assert.strictEqual('reason' in p, false);
+  // 앞의 pick이 무효(없는 청크)면 다음 유효한 pick을 쓴다.
+  const q = cleanPlan(plan([{ chunk_id: 'zzz', from: 1, to: 1 }, { chunk_id: 'p2', from: 2, to: 3 }]), chunks);
+  assert.deepStrictEqual(q.missions[0].pick, ['p2', 2, 3]);
 });
 
 test('계획 검증: 후보에 없는 청크·범위 밖 문장은 버리고, 유효한 미션이 없으면 오류', () => {
   const chunks = [{ id: 'p1', sec: 's', s: ['1.', '2.'], t: '1. 2.' }];
-  assert.throws(() => cleanPlan(plan([{ chunk_id: 'zzz', from: 1, to: 1 }]), chunks, 'A'), /no valid mission/);
-  assert.throws(() => cleanPlan(plan([{ chunk_id: 'p1', from: 1, to: 9 }]), chunks, 'A'), /no valid mission/);
-  assert.throws(() => cleanPlan({ reqs: [], missions: [] }, chunks, 'A'), /no reqs/);
+  assert.throws(() => cleanPlan(plan([{ chunk_id: 'zzz', from: 1, to: 1 }]), chunks), /no valid mission/);
+  assert.throws(() => cleanPlan(plan([{ chunk_id: 'p1', from: 1, to: 9 }]), chunks), /no valid mission/);
+  assert.throws(() => cleanPlan({ reqs: [], missions: [] }, chunks), /no reqs/);
+});
+
+// 한 절 'a'(idx 0~3)와 다음 절 'b'(idx 4~5)
+const pool = [
+  { id: 'a1', idx: 0, sec: 'a' }, { id: 'a2', idx: 1, sec: 'a' }, { id: 'a3', idx: 2, sec: 'a' }, { id: 'a4', idx: 3, sec: 'a' },
+  { id: 'b1', idx: 4, sec: 'b' }, { id: 'b2', idx: 5, sec: 'b' },
+];
+const ref = (id: string) => pool.find((c) => c.id === id)!;
+
+test('조건 B 확장: 핵심 청크 + 앞 1개 + 뒤 1개, 같은 절 안에서만', () => {
+  assert.deepStrictEqual(contextIds(ref('a2'), pool), ['a1', 'a2', 'a3']);
+  assert.deepStrictEqual(contextIds(ref('a1'), pool), ['a1', 'a2']); // 절의 첫 청크는 앞이 없다
+  assert.deepStrictEqual(contextIds(ref('a4'), pool), ['a3', 'a4']); // 뒤는 다음 절(b1)이라 붙이지 않는다
+  assert.deepStrictEqual(contextIds(ref('b1'), pool), ['b1', 'b2']); // 앞은 이전 절(a4)이라 붙이지 않는다
+  assert.deepStrictEqual(contextIds(ref('b2'), pool), ['b1', 'b2']); // 자료의 마지막 청크
+  assert.ok(pool.every((c) => contextIds(c, pool).length <= MAX_TEXT_UNITS));
+  assert.deepStrictEqual(contextIds(ref('a2'), pool.filter((c) => c.id !== 'a3')), ['a1', 'a2']); // 이웃이 후보에 없으면 생략
+});
+
+test('발췌 해석: A는 핵심 문장만, B는 같은 핵심 위에 앞뒤 청크 전체를 얹는다', () => {
+  const chunks = [
+    { id: 'a1', sec: 'a', s: ['앞 1.', '앞 2.'], t: '앞 1. 앞 2.' },
+    { id: 'a2', sec: 'a', s: ['핵심 1.', '핵심 2.', '핵심 3.'], t: '핵심 1. 핵심 2. 핵심 3.' },
+    { id: 'a3', sec: 'a', s: ['뒤 1.'], t: '뒤 1.' },
+  ];
+  const by = Object.fromEntries(chunks.map((c) => [c.id, c]));
+  const pick: [string, number, number] = ['a2', 1, 2];
+
+  const a = resolveExcerpts(by, pick, 'A', ['a2']);
+  assert.strictEqual(a.length, 1);
+  assert.strictEqual(a[0].text, '핵심 1. 핵심 2.');
+  assert.strictEqual(a[0].range, '문장 1–2');
+
+  const b = resolveExcerpts(by, pick, 'B', ['a1', 'a2', 'a3']);
+  assert.deepStrictEqual(b.map((e) => e.role), ['before', 'core', 'after']);
+  assert.deepStrictEqual(b.map((e) => e.id), ['a1', 'a2', 'a3']);
+  assert.strictEqual(b[1].text, '핵심 1. 핵심 2. 핵심 3.'); // 핵심 청크는 전체
+  assert.deepStrictEqual(b[1].focus, [1, 2]); // A가 보여 준 문장 범위는 표시용으로 남긴다
+  assert.ok(b[1].text.includes(a[0].text)); // B는 A의 텍스트를 포함한다 (변인은 앞뒤 청크 하나)
+  assert.ok(b.every((e) => e.ok));
+  assert.throws(() => resolveExcerpts(by, pick, 'B', ['a1', 'a3']), /core chunk/);
+});
+
+test('읽기 시간·과제 안내문 키', () => {
+  assert.strictEqual(estimateMins(0), 3);
+  assert.strictEqual(estimateMins(401), 4);
+  assert.strictEqual(normalizeAssignment('  두 문단\n  요약해  서 쓰세요 '), '두 문단 요약해 서 쓰세요');
 });
 
 test('안내 수준·깊이: 기본 모드는 수행에 따라 변하고, 실험 모드는 고정된다', () => {

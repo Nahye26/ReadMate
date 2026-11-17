@@ -12,13 +12,18 @@ export const JOL_VALUES = [0.125, 0.375, 0.625, 0.875]; // 회상 예측 선택�
 export const CALIB_THRESHOLD = 0.25; // 예측 − 실제 기준
 export const READING_TYPE: Record<Condition, string> = { A: '발췌형', B: '맥락형' };
 
+// 분량 상한의 단위는 청크다 (2026-11-17 확정, docs/DESIGN.md 6절).
+//   A = 핵심 청크 안 1~coreSent문장
+//   B = 핵심 청크 + 앞 ctxBefore개 + 뒤 ctxAfter개 (최대 MAX_TEXT_UNITS개 청크)
 export const CONFIG = {
   missions: 3,
   maxMissions: 4,
-  exSent: 3, // 발췌형(조건 A): 미션당 최대 문장 수
-  cxSent: 8, // 맥락형(조건 B): 미션당 최대 문장 수
+  coreSent: 3, // 조건 A: 미션당 핵심 청크 안 최대 문장 수
+  ctxBefore: 1, // 조건 B: 핵심 청크 앞에 붙이는 청크 수
+  ctxAfter: 1, // 조건 B: 핵심 청크 뒤에 붙이는 청크 수
   supStart: 2,
 };
+export const MAX_TEXT_UNITS = 1 + CONFIG.ctxBefore + CONFIG.ctxAfter; // 미션당 제공 청크 수 상한 (조건 B 기준 3)
 
 /* ---------- 청킹 ---------- */
 
@@ -86,38 +91,32 @@ export function isCopy(answer: string, excerpt: string): boolean {
 /* ---------- LLM이 만든 읽기 계획 검증 ---------- */
 
 export type Variant = { qtype: QType; q: string; keys: string[]; cue: string; frame: string };
-export type Mission = { req: number; mins: number; pick: Pick[]; vars: Variant[] };
+// 질문 세트의 미션. 조건과 무관하게 A 기준(핵심 청크 하나 안의 1~3문장)으로만 만든다.
+export type Mission = { req: number; pick: Pick; vars: Variant[] };
+export type PlanData = { reqs: string[]; missions: Mission[] };
 
-// 조건 A는 발췌형(짧게), 조건 B는 맥락형(앞뒤 문단 포함)으로 문장 상한이 달라진다.
-export function cleanPlan(
-  data: any,
-  candidates: Chunk[],
-  condition: Condition,
-  opts: { maxMissions?: number; charsPerMin?: number; answerMin?: number } = {},
-) {
+// LLM이 만든 읽기 계획을 A 기준으로 검증한다. 조건 B는 이 계획에 앞뒤 청크만 더한다(contextIds).
+// 미션마다 핵심 발췌는 한 청크 안의 1~CONFIG.coreSent문장이다. 첫 번째로 유효한 pick만 쓴다.
+export function cleanPlan(data: any, candidates: Chunk[], opts: { maxMissions?: number } = {}): PlanData {
   const byId: Record<string, Chunk> = {};
   candidates.forEach((c) => (byId[c.id] = c));
   const reqs: string[] = (data?.reqs ?? []).map(String).filter(Boolean).slice(0, 4);
   if (!reqs.length) throw new Error('no reqs');
 
-  const cap = condition === 'A' ? CONFIG.exSent : CONFIG.cxSent;
-  const per = condition === 'A' ? CONFIG.exSent : 5;
   const missions: Mission[] = [];
 
   (data?.missions ?? []).slice(0, opts.maxMissions ?? CONFIG.maxMissions).forEach((m: any) => {
-    const picks: Pick[] = [];
-    let total = 0;
-    (m.picks ?? []).slice(0, 3).forEach((p: any) => {
-      const c = byId[p.chunk_id];
-      if (!c) return;
+    let pick: Pick | null = null;
+    for (const p of m.picks ?? []) {
+      const c = byId[p?.chunk_id];
+      if (!c) continue;
       const a = Math.round(+p.from);
       let b = Math.round(+p.to);
-      if (!(a >= 1 && b >= a && b <= c.s.length)) return;
-      if (b - a + 1 > per) b = a + per - 1;
-      if (total + (b - a + 1) > cap) return;
-      total += b - a + 1;
-      picks.push([c.id, a, b]);
-    });
+      if (!(a >= 1 && b >= a && b <= c.s.length)) continue;
+      if (b - a + 1 > CONFIG.coreSent) b = a + CONFIG.coreSent - 1;
+      pick = [c.id, a, b];
+      break;
+    }
 
     const raw: any[] = Array.isArray(m.variants) && m.variants.length ? m.variants : m.question ? [m] : [];
     const seen = new Set<string>();
@@ -135,20 +134,76 @@ export function cleanPlan(
       });
     });
     vars.sort((x, y) => QTYPES.indexOf(x.qtype) - QTYPES.indexOf(y.qtype));
-    if (!picks.length || !vars.length) return;
+    if (!pick || !vars.length) return;
 
-    const chars = picks.reduce((n, p) => n + resolvePick(byId, p).text.length, 0);
     missions.push({
       req: Math.min(reqs.length, Math.max(1, Math.round(+m.req) || 1)),
-      mins: Math.max(1, Math.ceil(chars / (opts.charsPerMin ?? 400))) + (opts.answerMin ?? 2),
-      pick: picks,
+      pick,
       vars,
     });
   });
 
   if (!missions.length) throw new Error('no valid mission');
-  return { reqs, missions, reason: String(data?.reason ?? '') };
+  return { reqs, missions };
 }
+
+/* ---------- 조건 B: 계획에 앞뒤 청크만 더한다 ---------- */
+
+export type ChunkRef = { id: string; idx: number; sec: string };
+
+// 핵심 청크의 앞 before개·뒤 after개를 같은 절(sec) 안에서만 붙인다. 순서는 [앞…, 핵심, 뒤…].
+// 절 경계를 넘는 청크는 이어지는 논리 단위가 아니므로 붙이지 않는다(절의 첫·끝 청크는 한쪽만 붙는다).
+export function contextIds(
+  core: ChunkRef,
+  pool: ChunkRef[],
+  before = CONFIG.ctxBefore,
+  after = CONFIG.ctxAfter,
+): string[] {
+  const at = new Map(pool.filter((c) => c.sec === core.sec).map((c) => [c.idx, c.id]));
+  const ids: string[] = [];
+  for (let k = before; k >= 1; k--) {
+    const id = at.get(core.idx - k);
+    if (id) ids.push(id);
+  }
+  ids.push(core.id);
+  for (let k = 1; k <= after; k++) {
+    const id = at.get(core.idx + k);
+    if (id) ids.push(id);
+  }
+  return ids;
+}
+
+export type Excerpt = {
+  id: string;
+  sec: string;
+  text: string;
+  range: string;
+  ok: boolean;
+  role: 'before' | 'core' | 'after';
+  focus?: [from: number, to: number]; // 조건 B의 핵심 청크 안에서 A가 보여 주는 문장 범위
+};
+
+// 학생에게 보여 줄 발췌. 조건 A는 핵심 문장만, 조건 B는 ctx(앞·핵심·뒤 청크)를 청크 전체로 보여 준다.
+export function resolveExcerpts(byId: Record<string, Chunk>, pick: Pick, condition: Condition, ctx: string[]): Excerpt[] {
+  if (condition === 'A') return [{ ...resolvePick(byId, pick), role: 'core' }];
+  const coreAt = ctx.indexOf(pick[0]);
+  if (coreAt < 0) throw new Error('context must include the core chunk');
+  return ctx.map((id, k) => {
+    const c = byId[id];
+    if (!c) throw new Error('unknown chunk_id ' + id);
+    const full = resolvePick(byId, [id, 1, c.s.length]);
+    const role = k < coreAt ? 'before' : k > coreAt ? 'after' : 'core';
+    return role === 'core' ? { ...full, role, focus: [pick[1], pick[2]] as [number, number] } : { ...full, role };
+  });
+}
+
+// 읽기 시간 추정(분): 글자 수 기준 읽기 + 답하기.
+export function estimateMins(chars: number, charsPerMin = 400, answerMin = 2): number {
+  return Math.max(1, Math.ceil(chars / charsPerMin)) + answerMin;
+}
+
+// 과제 안내문을 질문 세트의 키로 쓰기 위해 공백만 정리한다.
+export const normalizeAssignment = (s: string) => s.replace(/\s+/g, ' ').trim();
 
 /* ---------- 안내 수준(스캐폴딩 페이딩)과 질문 깊이 ---------- */
 

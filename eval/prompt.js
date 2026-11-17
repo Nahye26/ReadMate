@@ -17,7 +17,7 @@ const SLOTS = [
 ];
 
 const DEFAULTS = {
-  MAX_TEXT_UNITS: '미션당 문단 4개 이하 (테스트용 임시값)',
+  MAX_TEXT_UNITS: '미션당 청크 3개 이하. 조건 A는 핵심 청크 안 1~3문장, 조건 B는 핵심 청크 + 앞 1개 + 뒤 1개(같은 절 안에서만). 실험 중 예외 없음.',
   FLOW_MAP: 'off',
 };
 
