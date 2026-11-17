@@ -57,27 +57,32 @@ export async function askJson(prompt: string, timeoutMs = ATTEMPT_MS) {
   const key = Deno.env.get('GEMINI_API_KEY');
   const model = Deno.env.get('GEMINI_MODEL');
   if (!key || !model) throw new LlmError('not_configured', 'GEMINI_API_KEY / GEMINI_MODEL 비밀값이 필요합니다');
+  // 주 모델이 계속 막히면(503/429/시간 초과) 예비 모델로 넘어간다. 예비 모델은 GEMINI_FALLBACK_MODELS(쉼표로 구분)로 바꿀 수 있다.
+  const fallbacks = (Deno.env.get('GEMINI_FALLBACK_MODELS') ?? 'gemini-3.5-flash-lite,gemini-3.1-flash-lite').split(',').map((m) => m.trim()).filter(Boolean);
+  const models = [model, ...fallbacks.filter((m) => m !== model)];
 
   const started = Date.now();
   let res: Response | undefined;
   let lastErr: LlmError | undefined;
-  for (let attempt = 0; attempt < 4; attempt++) {
-    const left = TOTAL_BUDGET_MS - (Date.now() - started);
-    if (left < 8000) break;
-    try {
-      res = await once(prompt, key, model, Math.min(timeoutMs, left));
-    } catch (e) {
-      lastErr = e as LlmError;
+  outer: for (const mdl of models) {
+    for (let attempt = 0; attempt < 2; attempt++) { // 모델마다 2번
+      const left = TOTAL_BUDGET_MS - (Date.now() - started);
+      if (left < 8000) break outer;
+      try {
+        res = await once(prompt, key, mdl, Math.min(timeoutMs, left));
+      } catch (e) {
+        lastErr = e as LlmError;
+        res = undefined;
+        await new Promise((r) => setTimeout(r, 1000));
+        continue;
+      }
+      if (res.ok) break outer;
+      const retryable = res.status === 429 || res.status >= 500;
+      if (!retryable) break outer; // 키 오류 등은 모델을 바꿔도 소용없다
+      lastErr = new LlmError(res.status === 429 ? 'rate_limited' : 'error', `HTTP ${res.status} (${mdl})`);
       res = undefined;
       await new Promise((r) => setTimeout(r, 1500));
-      continue;
     }
-    if (res.ok) break;
-    const retryable = res.status === 429 || res.status >= 500;
-    if (!retryable) break;
-    lastErr = new LlmError(res.status === 429 ? 'rate_limited' : 'error', `HTTP ${res.status}`);
-    res = undefined;
-    await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
   }
   if (!res) throw lastErr ?? new LlmError('timeout', '시간 초과');
 
