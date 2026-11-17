@@ -165,7 +165,7 @@ async function readPdf(file) {
 }
 
 // 자료를 작게 나눠 올린다. 서버는 한 번에 청크 30개까지만 받는다(임베딩 계산량 때문). 한 쪽은 보통 청크 10개 안팎이다.
-const BATCH_CHARS = 3000;
+const BATCH_CHARS = 1200; // 작게 보낸다: 한 호출의 계산량이 서버 한도를 넘지 않게
 async function uploadSource(title, pdf) {
   const batches = [];
   let cur = [], len = 0;
@@ -175,13 +175,25 @@ async function uploadSource(title, pdf) {
     for (let k = 0; k < s.text.length; k += 4500) { cur.push({ sec: s.sec, text: s.text.slice(k, k + 4500) }); len += Math.min(4500, s.text.length - k); }
   });
   if (cur.length) batches.push(cur);
-  let id = null, sent = 0, idx = 0;
+  // 빈 자료를 먼저 만들어 source_id를 확보한 뒤, 배치를 하나씩 이어 붙인다. 한 배치가 실패하면 그 배치만 다시 보낸다(서버는 같은 청크를 덮어쓴다).
+  const created = await call('ingest-source', { title, lang: pdf.lang, pages: pdf.pages });
+  const id = created.source_id;
+  let sent = 0, idx = 0;
   for (let b = 0; b < batches.length; b++) {
-    $('#layer .box2 div:last-child') && ($('#layer .box2 div:last-child').textContent = `자료를 올리는 중이에요… ${b + 1}/${batches.length}`);
-    const r = await call('ingest-source', id
-      ? { source_id: id, sections: batches[b], section_offset: sent, idx_start: idx }
-      : { title, lang: pdf.lang, pages: pdf.pages, sections: batches[b] });
-    id = r.source_id; idx = r.next_idx; sent += batches[b].length;
+    const msg = $('#layer .box2 div:last-child');
+    if (msg) msg.textContent = `자료를 올리는 중이에요… ${b + 1}/${batches.length}`;
+    let r, lastErr;
+    for (let attempt = 0; attempt < 4 && !r; attempt++) {
+      try {
+        r = await call('ingest-source', { source_id: id, sections: batches[b], section_offset: sent, idx_start: idx });
+      } catch (e) {
+        lastErr = e;
+        if (e.status && e.status < 500) throw e; // 요청 자체가 잘못된 경우는 다시 보내도 같다
+        await new Promise((ok) => setTimeout(ok, 1500 * (attempt + 1)));
+      }
+    }
+    if (!r) throw lastErr;
+    idx = r.next_idx; sent += batches[b].length;
   }
   return { id, title, pages: pdf.pages };
 }
