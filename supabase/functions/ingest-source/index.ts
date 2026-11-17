@@ -1,12 +1,18 @@
 // POST /ingest-source
-// 입력: { title, lang?, pages?, sections: [{ sec, text }] }  — PDF 텍스트 추출은 데모처럼 브라우저(pdf.js)에서 한다.
-// 동작: 문단 단위로 청킹 → 청크별 임베딩 → sources / chunks 저장
-// 출력: { source_id, chunks }
+// 입력: { title, lang?, pages?, sections: [{ sec, text }], source_id?, section_offset?, idx_start? }  — PDF 텍스트 추출은 데모처럼 브라우저(pdf.js)에서 한다.
+// 한 번의 호출은 임베딩 계산량 때문에 작게(청크 MAX_CHUNKS_PER_CALL개 이하) 유지한다. 긴 자료는 클라이언트가 나눠 보낸다.
+//   첫 호출: source_id 없이 보낸다 → 자료를 만들고 source_id를 돌려준다.
+//   이어 보내기: 첫 호출이 돌려준 source_id와, 이미 보낸 섹션 수(section_offset), 이미 저장된 청크 수(idx_start)를 함께 보낸다.
+//   section_offset은 청크 ID(p{섹션번호}-k)가 겹치지 않게, idx_start는 chunks.idx(앞뒤 청크 순서)가 이어지게 한다.
+// 동작: 문단 단위로 청킹 → 청크별 임베딩(한 번에 하나씩, 메모리를 아끼려고) → sources / chunks 저장
+// 출력: { source_id, chunks, next_idx }   (chunks: 이번 호출에서 저장한 수, next_idx: 다음 호출의 idx_start)
+// 실패하면 자료 전체(이미 저장한 청크 포함)를 지운다. 클라이언트는 처음부터 다시 올리면 된다.
 import { buildChunks, type Chunk } from '../_shared/core.ts';
 import { embed, toVector } from '../_shared/embed.ts';
 import { authedUser, corsHeaders, json, serviceClient } from '../_shared/http.ts';
 
-const MAX_CHUNKS = 800;
+const MAX_CHUNKS_PER_CALL = 30;
+const MAX_CHUNKS_TOTAL = 800;
 const MAX_CHARS = 600_000;
 
 Deno.serve(async (req) => {
@@ -23,47 +29,60 @@ Deno.serve(async (req) => {
     return json({ error: 'bad_json' }, 400);
   }
   const { title, lang, pages, sections } = body ?? {};
-  if (typeof title !== 'string' || !title.trim() || !Array.isArray(sections) || !sections.length) {
+  const append = typeof body?.source_id === 'string';
+  const sectionOffset = Number.isInteger(body?.section_offset) && body.section_offset >= 0 ? body.section_offset : 0;
+  const idxStart = Number.isInteger(body?.idx_start) && body.idx_start >= 0 ? body.idx_start : 0;
+  if (!Array.isArray(sections) || !sections.length || (!append && (typeof title !== 'string' || !title.trim()))) {
     return json({ error: 'bad_request', message: 'title과 sections가 필요합니다' }, 400);
   }
 
   const chunks: Chunk[] = [];
   sections.forEach((s: any, i: number) => {
     const text = String(s?.text ?? '');
-    const sec = String(s?.sec ?? `본문 ${i + 1}`);
-    buildChunks(text, sec, `p${i + 1}-`).forEach((c) => chunks.push(c));
+    const sec = String(s?.sec ?? `본문 ${sectionOffset + i + 1}`);
+    buildChunks(text, sec, `p${sectionOffset + i + 1}-`).forEach((c) => chunks.push(c));
   });
   const chars = chunks.reduce((n, c) => n + c.t.length, 0);
   if (!chunks.length) return json({ error: 'empty_text' }, 400);
-  if (chunks.length > MAX_CHUNKS || chars > MAX_CHARS) {
+  if (chunks.length > MAX_CHUNKS_PER_CALL) {
+    return json({ error: 'batch_too_large', message: `한 번에 청크 ${MAX_CHUNKS_PER_CALL}개까지 보낼 수 있습니다(받은 수 ${chunks.length})` }, 413);
+  }
+  if (idxStart + chunks.length > MAX_CHUNKS_TOTAL || chars > MAX_CHARS) {
     return json({ error: 'too_large', message: '자료가 너무 깁니다. 필요한 쪽만 잘라서 다시 올려 주세요.' }, 413);
   }
 
   const db = serviceClient();
-  const { data: source, error: srcErr } = await db
-    .from('sources')
-    .insert({ owner: user.id, title: title.trim().slice(0, 200), lang: lang === 'ko' || lang === 'en' ? lang : null, pages: Number.isInteger(pages) ? pages : null })
-    .select('id')
-    .single();
-  if (srcErr || !source) return json({ error: 'db_error', message: srcErr?.message }, 500);
+  let sourceId: string;
+  if (append) {
+    // 이어 보내기: 내 자료인지 확인한다(service role은 RLS를 우회한다).
+    const { data: src } = await db.from('sources').select('id, owner').eq('id', body.source_id).maybeSingle();
+    if (!src || src.owner !== user.id) return json({ error: 'not_found' }, 404);
+    sourceId = src.id;
+  } else {
+    const { data: source, error: srcErr } = await db
+      .from('sources')
+      .insert({ owner: user.id, title: title.trim().slice(0, 200), lang: lang === 'ko' || lang === 'en' ? lang : null, pages: Number.isInteger(pages) ? pages : null })
+      .select('id')
+      .single();
+    if (srcErr || !source) return json({ error: 'db_error', message: srcErr?.message }, 500);
+    sourceId = source.id;
+  }
 
   try {
     const rows: Record<string, unknown>[] = [];
-    for (let i = 0; i < chunks.length; i += 8) {
-      const batch = chunks.slice(i, i + 8);
-      const vecs = await Promise.all(batch.map((c) => embed(c.t)));
-      batch.forEach((c, k) =>
-        rows.push({ source_id: source.id, id: c.id, idx: i + k, sec: c.sec, sentences: c.s, text: c.t, embedding: toVector(vecs[k]) })
-      );
+    for (let i = 0; i < chunks.length; i++) {
+      // 한 번에 하나씩 계산한다. 여러 개를 동시에 돌리면 Edge Function의 메모리·CPU 한도(546)를 넘는다.
+      const c = chunks[i];
+      rows.push({ source_id: sourceId, id: c.id, idx: idxStart + i, sec: c.sec, sentences: c.s, text: c.t, embedding: toVector(await embed(c.t)) });
     }
     for (let i = 0; i < rows.length; i += 100) {
       const { error } = await db.from('chunks').insert(rows.slice(i, i + 100));
       if (error) throw new Error(error.message);
     }
   } catch (e) {
-    await db.from('sources').delete().eq('id', source.id); // chunks는 cascade로 함께 삭제
+    await db.from('sources').delete().eq('id', sourceId); // chunks는 cascade로 함께 삭제
     return json({ error: 'ingest_failed', message: (e as Error).message }, 500);
   }
 
-  return json({ source_id: source.id, chunks: chunks.length });
+  return json({ source_id: sourceId, chunks: chunks.length, next_idx: idxStart + chunks.length });
 });
