@@ -56,6 +56,8 @@ function errCopy(e) {
   if (c === 'timeout') return 'AI 응답이 늦어지고 있어요. 다시 시도해 주세요.';
   if (c === 'bad_key' || c === 'not_configured' || c === 'no_config') return '서비스 설정에 문제가 있어요. 연구자에게 알려 주세요.';
   if (c === 'invalid_json' || c === 'llm_failed') return 'AI 응답을 해석하지 못했어요. 다시 시도해 주세요.';
+  if (c === 'batch_too_large') return '자료를 나눠 올리는 중 문제가 생겼어요. 다시 시도해 주세요.';
+  if (c === 'ingest_failed') return '자료를 저장하지 못했어요. 잠시 뒤 다시 시도하거나 더 짧은 PDF로 해 보세요.';
   if (c === 'too_large') return '자료가 너무 길어요. 필요한 쪽만 잘라서 다시 올려 주세요.';
   if (c === 'empty_text') return '자료에서 글자를 읽지 못했어요. 글자를 선택할 수 있는 PDF인지 확인해 주세요.';
   if (c === 'toolong') return `PDF가 ${MAX_PAGES}쪽을 넘어요. 필요한 쪽만 잘라서 올려 주세요.`;
@@ -162,6 +164,28 @@ async function readPdf(file) {
   return { sections, pages: pdf.numPages, lang: ko > 0.2 ? 'ko' : 'en' };
 }
 
+// 자료를 작게 나눠 올린다. 서버는 한 번에 청크 30개까지만 받는다(임베딩 계산량 때문). 한 쪽은 보통 청크 10개 안팎이다.
+const BATCH_CHARS = 3000;
+async function uploadSource(title, pdf) {
+  const batches = [];
+  let cur = [], len = 0;
+  pdf.sections.forEach((s) => {
+    if (cur.length && len + s.text.length > BATCH_CHARS) { batches.push(cur); cur = []; len = 0; }
+    // 한 쪽이 아주 길면 쪽 하나를 여러 섹션으로 나눈다(청크 ID는 섹션 번호 기준이라 겹치지 않는다).
+    for (let k = 0; k < s.text.length; k += 4500) { cur.push({ sec: s.sec, text: s.text.slice(k, k + 4500) }); len += Math.min(4500, s.text.length - k); }
+  });
+  if (cur.length) batches.push(cur);
+  let id = null, sent = 0, idx = 0;
+  for (let b = 0; b < batches.length; b++) {
+    $('#layer .box2 div:last-child') && ($('#layer .box2 div:last-child').textContent = `자료를 올리는 중이에요… ${b + 1}/${batches.length}`);
+    const r = await call('ingest-source', id
+      ? { source_id: id, sections: batches[b], section_offset: sent, idx_start: idx }
+      : { title, lang: pdf.lang, pages: pdf.pages, sections: batches[b] });
+    id = r.source_id; idx = r.next_idx; sent += batches[b].length;
+  }
+  return { id, title, pages: pdf.pages };
+}
+
 async function makePlan() {
   S.error = null;
   try {
@@ -172,8 +196,7 @@ async function makePlan() {
         const pdf = await readPdf(S.file);
         if (!pdf.sections.length) throw { code: 'empty_text' };
         const title = S.file.name.replace(/\.pdf$/i, '');
-        const r = await call('ingest-source', { title, lang: pdf.lang, pages: pdf.pages, sections: pdf.sections });
-        return { id: r.source_id, title, pages: pdf.pages };
+        return await uploadSource(title, pdf);
       });
     }
     S.plan = await withBusy('읽기 계획을 만드는 중이에요. 30초 정도 걸릴 수 있어요…', () => call('plan-session', {
