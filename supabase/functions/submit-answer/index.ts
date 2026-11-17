@@ -1,5 +1,6 @@
 // POST /submit-answer
-// 입력: { session_id, mission_idx, action: 'answer' | 'hint', qtype, answer? }
+// 입력: { session_id, mission_idx, action: 'answer' | 'hint', qtype, answer?, evidence? }
+//   evidence: 학생이 원문에서 눌러 고른 근거 문장 번호(근거 범위 안의 1부터 번호, 최대 5개). 선택 사항이며 판정에는 쓰지 않고 기록만 한다(로그의 evidence_cited, 결과표의 근거 문장 수).
 //   answer: 학생 답변 제출. 복붙이면 다시 쓰게 하고, 아니면 판정(pass/partial/fail)한다.
 //   hint:   학생이 막혀서 요청했을 때만. 서버가 자동으로 주지 않는다. 한 번에 한 단계씩 1 → 2 → 3.
 // 규칙(프롬프트 v0.5 1-5, 1-6절):
@@ -13,8 +14,8 @@
 // 클라이언트는 응답이 올 때까지 제출 버튼을 막아야 한다.
 // 판정은 조건(A/B)과 무관하게 핵심 발췌 + key_points만으로 한다. 복붙 감지도 핵심 발췌와 비교해, B의 추가 텍스트가 감지 기준을 바꾸지 않게 한다.
 import {
-  answerOutcome, currentMission, isCopy, leaksKey, MAX_HINT, missionState, pickQtype, QTYPES, resolvePick, sentenceNums,
-  supportBefore, type Chunk, type FlowOpts, type Pick, type QType, type Verdict,
+  answerOutcome, basisPick, currentMission, isCopy, leaksKey, MAX_HINT, missionState, pickQtype, QTYPES, resolvePick, sentenceNums,
+  supportBefore, type Basis, type Chunk, type FlowOpts, type Pick, type QType, type Verdict,
 } from '../_shared/core.ts';
 import { authedUser, corsHeaders, json, serviceClient } from '../_shared/http.ts';
 import { askJson, LlmError } from '../_shared/llm.ts';
@@ -40,6 +41,9 @@ Deno.serve(async (req) => {
   }
   const { session_id, mission_idx, action, qtype } = body ?? {};
   const answer = str(body?.answer, MAX_ANSWER_CHARS + 1);
+  if (body?.evidence !== undefined && !Array.isArray(body.evidence)) {
+    return json({ error: 'bad_request', message: 'evidence는 문장 번호 배열이어야 합니다' }, 400);
+  }
   if (typeof session_id !== 'string' || !Number.isInteger(mission_idx) || mission_idx < 0) {
     return json({ error: 'bad_request', message: 'session_id와 mission_idx가 필요합니다' }, 400);
   }
@@ -80,11 +84,16 @@ Deno.serve(async (req) => {
   if (state.qtype && state.qtype !== qtype) return json({ error: 'qtype_mismatch', expected: state.qtype }, 409);
 
   // 3) 핵심 발췌 (A 기준). 판정·힌트·복붙 감지는 모두 이 텍스트를 기준으로 한다.
-  const pick = (mission.picks as Pick[])[0];
+  const basis = ((ses.config as { basis?: Basis } | null)?.basis) ?? 'excerpt';
+  const picked = (mission.picks as Pick[])[0];
   const { data: coreRow } = await db
-    .from('chunks').select('id, sec, sentences').eq('source_id', ses.source_id).eq('id', pick[0]).maybeSingle();
+    .from('chunks').select('id, sec, sentences').eq('source_id', ses.source_id).eq('id', picked[0]).maybeSingle();
   if (!coreRow) return json({ error: 'chunk_missing' }, 500);
   const core: Chunk = { id: coreRow.id, sec: coreRow.sec, s: coreRow.sentences, t: (coreRow.sentences as string[]).join(' ') };
+  // 근거 범위 밖의 번호, 중복, 6번째 이후는 버린다. 선택은 비어 있어도 된다.
+  const evidence: number[] = [...new Set<number>((body?.evidence ?? []).map((n: unknown) => Math.round(Number(n))))]
+    .filter((n) => n >= 1 && n <= core.s.length).sort((a, b) => a - b).slice(0, 5);
+  const pick = basisPick(basis, picked, core.s.length); // 근거 범위: excerpt면 고른 문장, chunk면 핵심 청크 전체
   const byId = { [core.id]: core };
   const coreView = { sentences: core.s.slice(pick[1] - 1, pick[2]), from: pick[1] };
   const coreText = coreView.sentences.join(' ');
@@ -193,7 +202,7 @@ Deno.serve(async (req) => {
   const outcome = answerOutcome(attemptsBefore, verdict);
   const stage = attemptsBefore === 0 ? 'first' : 'revision';
   const payload = {
-    qtype, stage, copy: false, verdict, outcome, evidence_cited: evidenceCited, used_context: usedContext,
+    qtype, stage, copy: false, verdict, outcome, evidence_cited: evidenceCited || evidence.length > 0, evidence, used_context: usedContext,
     hints_before: state.hintLevel, len: answer.length, ...stored,
   };
   const err = await record(payload, 'answer');
@@ -214,7 +223,7 @@ Deno.serve(async (req) => {
       from: from.sup, to: to.sup, depthFrom: from.depth, depthTo: to.depth, hints: state.hintLevel, revised: stage === 'revision',
     });
   }
-  const base = { action: 'answer', outcome, verdict, hint_level: state.hintLevel, evidence_cited: evidenceCited };
+  const base = { action: 'answer', outcome, verdict, hint_level: state.hintLevel, evidence_cited: evidenceCited || evidence.length > 0, evidence };
 
   if (outcome === 'passed') {
     await event('mission_passed', { stage, hints: state.hintLevel });

@@ -60,11 +60,14 @@ flowchart LR
      **실험 모드(효과성 검증)**에서는 (자료, 과제 안내문)마다 한 번만 만들어 `question_sets`에 저장하고 A/B 세션이 모두 같은 세트를 쓴다.
      **그 밖(사용성 테스트)**에서는 세션마다 새로 만들고 저장하지 않는다. 과제 요구 항목은 `sessions.config.reqs`에 남긴다.
    - 조건 B: 미션마다 핵심 청크의 같은 절 안 앞 1개·뒤 1개를 붙인다(`contextIds`). 질문·판정 기준은 A와 같다.
+   - **근거 범위(`basis`)**: 질문이 답할 수 있어야 하고 판정·힌트·복붙 감지·인출이 기준으로 삼는 텍스트다. 사용성 테스트(실험 모드 아님, 조건 B)는 `chunk`(고른 문장이 속한 핵심 청크 전체), 그 밖(효과성 검증, 조건 A)은 `excerpt`(고른 1~3문장)다. 실험 모드는 A/B가 같은 질문 세트와 같은 기준을 써야 하므로 항상 `excerpt`다. 앞뒤 청크는 어느 쪽에서도 근거가 아니고 `used_context` 판단에만 쓴다. 값은 `sessions.config.basis`에 남는다.
    - 세션마다 `missions`(학생에게 보임, 제공 청크 `context_ids` 포함)와 `mission_secrets`(판정 기준)로 나눠 저장한다.
 3. **미션 진행** (`submit-answer`, 프롬프트 v0.5 1-5·1-6절): 미션은 순서대로만 진행한다.
    - 힌트는 학생이 요청할 때만 준다(`action: 'hint'`). 자동으로 주지 않는다. 한 번에 한 단계씩 1(볼 관점) → 2(위치 + 원문 인용 1~2문장, 인용문은 서버가 원문에서 꺼냄) → 3(대비 구조 설명). 정답 문장은 쓰지 않고, 판정 기준을 그대로 담은 힌트는 서버가 걸러 대체 문구로 바꾼다.
    - 답을 내면(`action: 'answer'`) 서버가 복붙을 감지하고(`isCopy`, 핵심 발췌와 비교), 아니면 LLM이 key_points로 pass/partial/fail을 판정한다.
    - 보완은 미션당 1회. 첫 답이 pass가 아니면 맞은 부분 + 빠진 한 가지 + 다시 확인할 위치를 안내한다(정답은 안 알려 줌). 보완 답도 pass가 아니면 핵심 요점을 보여 주고 미해결로 넘어간다. 첫 답이 pass면 보완을 요청하지 않는다. 힌트 횟수와 보완 횟수는 따로 센다. 복붙으로 다시 쓰게 한 것은 보완으로 세지 않는다.
+   - 답과 함께 `evidence`(학생이 원문에서 고른 근거 문장 번호, 최대 5개, 선택)를 보내면 기록하고 응답에 되돌려 준다. 판정에는 쓰지 않는다. `evidence_cited`는 AI 판단 또는 선택이 있으면 true다.
+   - 질문 신고(`report-question`): `weird`(이 질문이 이상해요) / `unanswerable`(답할 수 없어요) / `mismatch`(원문과 달라요) / `too_easy`(너무 쉬워요)를 `events`에 기록한다. 진행에는 영향이 없고, 답변 저장에 동의한 경우에만 `note`를 남긴다.
    - 판정·복붙 감지는 조건(A/B)과 무관하게 **핵심 발췌 + key_points**만으로 한다. 조건 B에서만 앞뒤 맥락을 LLM에 따로 보여 주지만 `used_context`(로그의 context_used) 판단에만 쓴다.
    - 상태는 따로 저장하지 않고 `turns` 기록에서 되살린다(`missionState`). 각 답변 기록에 `evidence_cited`, `used_context`, 판정, 결과가 들어간다. 답변 원문은 동의한 경우에만 남는다.
    - 미션이 끝나면(통과 또는 미해결) 응답의 `next_support`로 다음 미션의 안내 수준·질문 깊이·질문 유형을 돌려준다. 첫 미션의 값은 `plan-session` 응답의 `start_support`다. 서버가 앞선 미션 기록에서 처음부터 다시 계산한다(`supportBefore`). 실험 모드에서는 고정이다.
@@ -76,20 +79,22 @@ flowchart LR
      | 많이 | 힌트 2단계 이상, **미해결** | 안내 +1(최대 2), 깊이 −1(최소 0) |
 
      시작은 안내 수준 2(읽기 전 안내 + 답변 틀), 깊이 0(이해). 질문 유형은 깊이에 가장 가까운 유형(같은 거리면 깊은 쪽)이고, 적응 모드의 마지막 미션은 최소 추론이다. 적응하지 않는 모드는 깊이 1로 고정한다. 안내 요청(`cueAsked`)은 서버에 기록이 없어 아직 반영하지 않는다.
-4. **인출·예측** (`recall`, 프롬프트 v0.5 1-7·2절): 모든 미션이 끝난 뒤 한 미션을 골라(통과한 추론·평가 미션 우선, 없으면 통과한 마지막, `pickRecallMission`) 원문을 가린 채 진행한다. 순서는 `start`(질문, 예측 선택지) → `predict`(4지선다 0.125/0.375/0.625/0.875, 쓰기 전에 받음) → `submit`(기억해서 쓴 글) → `fix`(원문과 비교해 고치기). `skip`은 어느 단계에서든 가능하다.
-   - 채점 범위는 핵심 발췌의 key_points뿐이다. LLM은 떠올린 핵심의 **번호**만 돌려주고, 서버가 맞은 수와 빠진 핵심 문장을 계산한다. 조건 B의 앞뒤 청크는 쓰지 않는다(`new_info_in_recall`은 항상 false).
-   - 응답에 떠올린 핵심 수, 빠진 핵심, 예측과의 차이(`calibrate`, ±0.25), 원문 발췌가 들어간다. 판정을 못 받으면(LLM 오류) 기록하지 않고 같은 글을 다시 낼 수 있다.
-   - 고쳐 쓰기(`fix`)에서 바뀌었으면 self_correction으로 센다. 답변 저장에 동의했으면 서버가 처음 글과 직접 비교하고, 동의가 없으면 글을 저장하지 않으므로 클라이언트가 보낸 `changed`를 쓴다.
+4. **인출·예측** (`recall`, 프롬프트 v0.5 2절, Figma 흐름): 모든 미션이 끝난 뒤 **통과한 미션 전체**를 통합해 확인한다. 순서는 `start`(안내, 예측 선택지) → `predict`(4지선다 0.125/0.375/0.625/0.875, 쓰기 전에 받음) → `submit`(원문을 보지 않고 기억나는 대로 쓴 글). `skip`은 어느 단계에서든 가능하다.
+   - 채점 범위는 통과한 미션의 key_points(근거 범위 안의 내용)뿐이다. 미해결 미션은 핵심을 이미 보여 줬으므로 제외한다. 조건 B의 앞뒤 청크는 쓰지 않는다(`new_info_in_recall`은 항상 false).
+   - AI는 미션을 가로질러 이어 붙인 핵심 번호 중 떠올린 번호만 돌려주고, 서버가 미션별·전체 맞은 수(`tallyRecall`), 실제 비율, 예측과의 차이(`calibrate`, ±0.25)를 계산한다. 판정을 못 받으면(LLM 오류) 기록하지 않고 같은 글을 다시 낼 수 있다.
+   - **한 번 쓰면 끝이다.** 빠진 핵심 문장을 보여 주지 않고, 원문과 비교해 고쳐 쓰게 하지도 않으며, 맞고 틀림을 글에 표시하지 않는다. 학생 피드백("완전한 답을 낼 때까지 계속 다듬게 해서 답답함", "갑자기 새로운 내용이 나옴")을 반영했다. 응답은 맞은 수와 예측 비교뿐이다.
+   - **연결 제안(선택)** (`connect`, 프롬프트 v0.5 3절): 인출이 끝나거나 건너뛴 뒤, 통과한 미션이 2개 이상일 때만 "앞에서 읽은 개념과 사례를 과제에서 어떻게 이어 볼 수 있을까요?"를 한 번 제안한다(`start`). 학생이 쓰면(`submit`) 연결 문장을 대신 쓰지 않고, 그 연결이 어느 미션의 어떤 근거에 기대는지 원문에서 다시 찾아보게 묻는 한두 문장만 돌려준다. 건너뛰기(`skip`)가 가능하고 종료의 조건이 아니다. 기록은 `turns.kind = 'connect'`(마이그레이션 `20261118000000_turns_connect.sql`), 요약에는 `connection`(answered / skipped / none)으로 남는다. 학생 피드백(과제의 개념·사례·시사점이 앞 미션과 이어지지 않고 각각 추천됨)을 반영했다.
 5. **종료** (`finish-session`, 프롬프트 v0.5 4절): 입력은 `reading_load`(1~5)와 중간 종료일 때의 `exit_reason`뿐이다. 서버가 `turns`에서 미션별 기록을 모아(`missionRecords`) v0.5 요약(`summarize`)을 만들어 `sessions.summary`에 저장하고 세션을 닫는다. 정상 종료는 미션과 인출이 모두 끝난(또는 건너뛴) 뒤에만 된다.
    - `text_units_provided`는 `missions.context_ids`의 길이다. B에서 절 경계 때문에 앞뒤 청크가 모자란 미션은 `context_boundary`에 true로 남겨, 분석에서 따로 보거나 뺄 수 있다.
+   - `evidence_count`는 미션별로 학생이 고른 근거 문장 수(마지막 답 기준), `question_reports`는 미션별 질문 신고 사유 배열이다.
    - 시작하지 않은 미션은 요약에서 빠지고, 끝나지 않은 채 종료한 미션은 미해결로 센다. 인출을 하지 않았으면 예측·실제·보정은 null이다.
-   - `self_corrections`: 보완한 답이 통과한 미션(`미션 N 보완`)과 인출에서 고쳐 쓴 경우(`미션 N 인출 확인`).
-   - 확인이 필요한 값: `activity_type`은 질문 유형에서 정한 대응(이해→근거 문장 찾기, 추론→생략된 의미 추론하기, 평가→주장과 근거 구분하기)이지 실제 활동을 판정한 값이 아니다. `context_sufficient`는 계획 단계에서 핵심 발췌만으로 답할 수 있는 질문만 남기므로 true로 채우며 별도로 점검한 값이 아니다.
+   - `self_corrections`: 보완한 답이 통과한 미션(`미션 N 보완`). 인출에서는 고쳐 쓰기가 없으므로 세지 않는다.
+   - 확인이 필요한 값: `activity_type`은 질문 유형에서 정한 대응(이해→근거 문장 찾기, 추론→생략된 의미 추론하기, 평가→주장과 근거 구분하기)이지 실제 활동을 판정한 값이 아니다. `context_sufficient`는 계획 단계에서 근거 범위(`basis`) 안에서 답할 수 있는 질문만 남기므로 true로 채우며 별도로 점검한 값이 아니다.
    - 같은 요청을 다시 보내면 저장된 요약을 돌려준다. 요약은 연구 동의와 관계없이 본인 세션에 저장되고, 연구자용 `research_summaries` 뷰는 동의한 세션만 보여 준다.
 
 ## 4. 데이터 모델
 
-마이그레이션: `supabase/migrations/20261105000000_init.sql`, `20261117000000_question_sets.sql`(질문 세트·공유 자료·제공 청크)
+마이그레이션: `supabase/migrations/20261105000000_init.sql`, `20261117000000_question_sets.sql`(질문 세트·공유 자료·제공 청크), `20261118000000_turns_connect.sql`(turns.kind에 connect)
 
 | 테이블 | 용도 | 클라이언트 접근 |
 |---|---|---|
@@ -122,9 +127,9 @@ flowchart LR
 | `startLive`, `planLive` | `plan-session` (질문 세트 생성·재사용 포함) | 완료 (타입 검사만, 실행 미검증) |
 | 업로드·청킹(`pdfRead`, `textChunks`) | 추출은 클라이언트, 청킹·저장은 `ingest-source` | 완료 (미검증) |
 | `submit`, 힌트, `failMission` | `submit-answer` (데모와 달리 힌트는 요청 시에만, 보완은 1회) | 완료 (타입 검사만, 실행 미검증) |
-| `startRecall`, `submitRecall` | `recall` (예측 → 쓰기 → 원문 비교 후 고치기, 핵심 번호로 채점) | 완료 (타입 검사만, 실행 미검증) |
+| `startRecall`, `submitRecall` | `recall` (예측 → 통합 쓰기, 핵심 번호로 채점. 원문 비교·고쳐 쓰기는 뺌) | 완료 (타입 검사만, 실행 미검증) |
 | `summary`의 저장 | `finish-session` | 완료 (타입 검사만, 실행 미검증) |
-| 기록 패널 | 클라이언트 | M2 |
+| 기록 패널 | `web/` (결과 화면의 세션 기록) | 완료 (가짜 서버로 흐름만 확인) |
 | `claimStage`, `outlineStep`(과제 지원) | 별도 함수 | M3 이후, 범위 결정 필요 |
 
 ## 6. 실험 모드 (A/B 비교)
@@ -185,7 +190,7 @@ npx supabase login
 npx supabase link --project-ref gcqpbjyjpiryviulbbyq
 npx supabase db push                                   # 마이그레이션 적용 (init + question_sets 두 파일)
 npx supabase secrets set GEMINI_API_KEY=... GEMINI_MODEL=...   # 값은 터미널에서 직접 입력. 커밋 금지
-npx supabase functions deploy ingest-source plan-session submit-answer recall finish-session
+npx supabase functions deploy ingest-source plan-session submit-answer report-question recall connect finish-session
 ```
 
 - Auth 설정에서 **Anonymous sign-ins**를 켜야 한다.
@@ -195,7 +200,7 @@ npx supabase functions deploy ingest-source plan-session submit-answer recall fi
 
 | 대상 | 방법 | 결과 |
 |---|---|---|
-| 핵심 로직 | `node --test supabase/functions/_shared/core.test.ts` | 25건 통과 (A 기준 계획 검증, B 확장, 발췌 해석, 미션 상태·보완·힌트 규칙, 인출 상태·대상 선택, 요약 조립, 요약 로그가 eval 검사기 통과) |
+| 핵심 로직 | `node --test supabase/functions/_shared/core.test.ts` | 28건 통과 (A 기준 계획 검증, B 확장, 발췌 해석, 미션 상태·보완·힌트 규칙, 인출 상태·대상 선택, 요약 조립, 요약 로그가 eval 검사기 통과) |
 | 로그 검사기 | `cd eval && node --test test/check_log.test.js` | 16건 통과 |
 | 기록-재생 평가 | `cd eval && npx promptfoo@latest eval -c promptfooconfig.yaml --no-cache` | 파일럿 2건 통과, 잘못된 로그는 FAIL 확인 |
 | Edge Function 타입 | `deno check` | 통과 |

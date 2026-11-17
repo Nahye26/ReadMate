@@ -9,7 +9,7 @@
 // 출력: 학생에게 보여 줄 미션(발췌 원문, 질문 변형). 판정 기준(key_points)은 응답에 포함하지 않는다.
 import {
   CONFIG, cleanPlan, contextIds, DEFAULT_FLOW, estimateMins, EXPERIMENT_FLOW, normalizeAssignment, pickQtype, resolveExcerpts,
-  type Chunk, type ChunkRef, type Condition, type PlanData,
+  basisFor, type Basis, type Chunk, type ChunkRef, type Condition, type PlanData,
 } from '../_shared/core.ts';
 import { embed, toVector } from '../_shared/embed.ts';
 import { authedUser, corsHeaders, json, serviceClient } from '../_shared/http.ts';
@@ -36,7 +36,7 @@ const toChunk = (r: Row): Chunk => ({ id: r.id, sec: r.sec, s: r.sentences, t: r
 // 질문 세트를 만든다. fixed(효과성 검증)면 저장된 세트를 우선 쓰고 없으면 만들어 저장한다. 아니면 매번 새로 만들고 저장하지 않는다.
 async function questionSetFor(
   db: Db,
-  a: { sourceId: string; assignment: string; fast: boolean; paperId: string | null; fixed: boolean },
+  a: { sourceId: string; assignment: string; fast: boolean; paperId: string | null; fixed: boolean; basis: Basis },
 ): Promise<{ id: string | null; plan: PlanData }> {
   // fast(미션 2개)는 세트 모양이 다르므로 키에 넣어 정식 세트와 섞이지 않게 한다.
   const hash = await sha256(normalizeAssignment(a.assignment) + (a.fast ? '|fast' : ''));
@@ -59,7 +59,7 @@ async function questionSetFor(
 
   let plan: PlanData;
   try {
-    const data = await askJson(buildPlanPrompt({ assignment: a.assignment, candidates, fast: a.fast }));
+    const data = await askJson(buildPlanPrompt({ assignment: a.assignment, candidates, fast: a.fast, basis: a.basis }));
     plan = cleanPlan(data, candidates, { maxMissions: a.fast ? 2 : undefined });
   } catch (e) {
     const code = e instanceof LlmError ? e.code : 'invalid_plan';
@@ -104,6 +104,7 @@ Deno.serve(async (req) => {
     return json({ error: 'bad_request', message: 'condition은 A 또는 B여야 합니다' }, 400);
   }
   const cond = condition as Condition;
+  const basis = basisFor(!!experiment, cond); // 사용성 테스트(B)는 핵심 청크 전체, 효과성 검증은 고른 문장만을 근거로 삼는다
 
   const db = serviceClient();
 
@@ -120,6 +121,7 @@ Deno.serve(async (req) => {
       fast: !!fast,
       paperId: typeof paper_id === 'string' ? paper_id.slice(0, 80) : null,
       fixed: !!experiment,
+      basis,
     });
   } catch (e) {
     if (e instanceof PlanError) return json({ error: e.code, message: e.message }, e.status);
@@ -173,7 +175,7 @@ Deno.serve(async (req) => {
       consent_research: !!consent_research,
       consent_answers: !!consent_answers,
       assignment: consent_answers ? assignment : null, // 답변 저장 동의가 없으면 과제 안내문도 남기지 않는다
-      config: { ...flow, reqs: plan.reqs }, // submit-answer가 과제 요구 항목을 읽는다(세트를 저장하지 않는 세션도 있다)
+      config: { ...flow, reqs: plan.reqs, basis }, // submit-answer가 과제 요구 항목을 읽는다(세트를 저장하지 않는 세션도 있다)
     })
     .select('id')
     .single();
