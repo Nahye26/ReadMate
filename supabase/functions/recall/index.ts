@@ -4,7 +4,7 @@
 //   start:   인출할 미션과 질문, 예측 선택지를 돌려준다. 원문 발췌는 돌려주지 않는다(화면에서 가리는 단계). 이미 시작했으면 지금 단계를 돌려준다.
 //   predict: 예측 선택(0.125 / 0.375 / 0.625 / 0.875)을 기록한다. 쓰기 전에 받아야 하므로 submit보다 먼저여야 한다.
 //   submit:  원문을 보지 않고 쓴 글을 핵심 요소와 견준다. 떠올린 핵심 수, 빠진 핵심, 예측 비교(과대/비슷/과소), 원문 발췌를 돌려준다.
-//   fix:     원문과 비교해 고쳐 쓴 결과. changed가 true면 self_correction으로 센다. 서버는 이전 답을 알 수 없을 수 있으므로(동의가 없으면 저장하지 않는다) changed는 클라이언트가 알려 준다.
+//   fix:     원문과 비교해 고쳐 쓴 결과(answer). 답변 저장에 동의했으면 서버가 처음 글과 직접 비교해 changed를 정하고, 동의가 없으면 클라이언트가 보낸 changed를 쓴다. changed면 self_correction으로 센다.
 //   skip:    인출을 건너뛴다.
 // 채점 범위는 핵심 발췌의 key_points뿐이다. 조건 B의 앞뒤 청크는 쓰지 않는다(프롬프트 v0.5 1-7, new_info_in_recall = false).
 // 상태는 turns 기록에서 되살린다(core.ts recallState).
@@ -47,8 +47,8 @@ Deno.serve(async (req) => {
   if (action === 'predict' && !JOL_VALUES.includes(body?.jol)) {
     return json({ error: 'bad_request', message: `jol은 ${JOL_VALUES.join(' / ')} 중 하나여야 합니다` }, 400);
   }
-  if (action === 'fix' && typeof body?.changed !== 'boolean') {
-    return json({ error: 'bad_request', message: 'changed(true/false)가 필요합니다' }, 400);
+  if (action === 'fix' && typeof body?.changed !== 'boolean' && !answer) {
+    return json({ error: 'bad_request', message: 'changed(true/false) 또는 고쳐 쓴 answer가 필요합니다' }, 400);
   }
 
   const db = serviceClient();
@@ -176,7 +176,10 @@ Deno.serve(async (req) => {
 
   /* ---------- 원문과 비교해 고쳐 쓰기 ---------- */
   if (state.stage !== 'answered') return json({ error: 'wrong_stage', stage: state.stage }, 409);
-  const changed = body.changed === true;
+  // 답변 저장에 동의했으면 처음에 쓴 글이 기록에 있으므로 서버가 직접 비교한다. 동의가 없으면 클라이언트가 알려 준 값을 쓴다.
+  const before = history.find((h) => h.kind === 'recall' && h.payload?.stage === 'answer')?.payload?.answer;
+  const norm = (x: string) => x.replace(/\s+/g, ' ').trim();
+  const changed = typeof before === 'string' && answer ? norm(before) !== norm(answer) : body.changed === true;
   const fail = await record('fix', target, {
     recall: true, m: target, changed, len: answer.length,
     ...(ses.consent_answers && answer ? { answer } : {}),
