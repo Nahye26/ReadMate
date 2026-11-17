@@ -265,3 +265,88 @@ test('요약 로그 값: 미해결·힌트 집계와 회상 계산', () => {
   assert.strictEqual(log.calibration_gap, 0.125);
   assert.strictEqual(log.reading_type, '발췌형');
 });
+
+/* ---------- 인출 확인 · 세션 요약 ---------- */
+import { recallState, pickRecallMission, parseRecalled, missionRecords, ACTIVITY_BY_QTYPE } from './core.ts';
+
+const ans = (m: number, p: object) => ({ mission_idx: m, kind: 'answer', payload: { qtype: 'literal', ...p } });
+const hint = (m: number, level: number) => ({ mission_idx: m, kind: 'hint', payload: { qtype: 'literal', level } });
+
+test('recallState: 기록에서 단계를 되살린다', () => {
+  assert.strictEqual(recallState([]).stage, 'none');
+  const p = { mission_idx: 1, kind: 'recall', payload: { stage: 'predict', m: 1, jol: 0.625 } };
+  assert.deepStrictEqual(recallState([p]).jol, 0.625);
+  const a = { mission_idx: 1, kind: 'recall', payload: { stage: 'answer', m: 1, recalled: [1, 3], total: 3 } };
+  const st = recallState([p, a]);
+  assert.strictEqual(st.stage, 'answered');
+  assert.deepStrictEqual(st.recalled, [1, 3]);
+  assert.strictEqual(recallState([p, a, { mission_idx: 1, kind: 'fix', payload: { recall: true, changed: true } }]).stage, 'done');
+  assert.strictEqual(recallState([p, { mission_idx: null, kind: 'recall', payload: { stage: 'skip' } }]).stage, 'skipped');
+});
+
+test('pickRecallMission: 통과한 추론·평가 미션 우선, 없으면 통과한 마지막, 미해결은 제외', () => {
+  const t = [
+    ans(0, { qtype: 'literal', outcome: 'passed' }),
+    ans(1, { qtype: 'inferential', outcome: 'unresolved' }),
+    ans(2, { qtype: 'literal', outcome: 'passed' }),
+  ];
+  assert.strictEqual(pickRecallMission(t, 3), 2); // 통과한 마지막(추론은 미해결이라 제외)
+  t.push(ans(3, { qtype: 'evaluative', outcome: 'passed' }));
+  assert.strictEqual(pickRecallMission(t, 4), 3);
+  assert.strictEqual(pickRecallMission([ans(0, { outcome: 'unresolved' })], 1), null);
+});
+
+test('parseRecalled: 범위 밖·중복·문자열을 걸러 낸다', () => {
+  assert.deepStrictEqual(parseRecalled([3, '1', 1, 0, 9, 'x'], 3), [1, 3]);
+  assert.deepStrictEqual(parseRecalled('1', 3), []);
+});
+
+test('missionRecords: 힌트·보완·인출·경계 청크를 기록에서 모은다', () => {
+  const turns = [
+    hint(0, 1),
+    ans(0, { stage: 'first', verdict: 'partial', outcome: 'revise' }),
+    ans(0, { stage: 'revision', verdict: 'pass', outcome: 'passed', evidence_cited: true, used_context: true }),
+    ans(1, { qtype: 'inferential', stage: 'first', verdict: 'fail', outcome: 'revise' }),
+    ans(1, { qtype: 'inferential', stage: 'revision', verdict: 'fail', outcome: 'unresolved' }),
+    { mission_idx: 0, kind: 'recall', payload: { stage: 'predict', m: 0, jol: 0.875 } },
+    { mission_idx: 0, kind: 'recall', payload: { stage: 'answer', m: 0, recalled: [1], total: 2 } },
+    { mission_idx: 0, kind: 'fix', payload: { recall: true, changed: true } },
+  ];
+  const missions = [
+    { idx: 0, context_ids: ['a', 'b', 'c'] },
+    { idx: 1, context_ids: ['x', 'y'] }, // 절 끝이라 뒤 청크 없음
+    { idx: 2, context_ids: ['z'] }, // 시작하지 않음
+  ];
+  const r = missionRecords(turns, missions, DEFAULT_FLOW, 'B');
+  assert.strictEqual(r.records.length, 2); // 시작하지 않은 미션은 제외
+  assert.deepStrictEqual(r.records.map((m) => m.textUnits), [3, 2]);
+  assert.deepStrictEqual(r.boundary, [false, true]);
+  assert.deepStrictEqual(r.records.map((m) => m.unresolved), [false, true]);
+  assert.strictEqual(r.records[0].hintLevel, 1);
+  assert.strictEqual(r.records[0].contextUsed, true);
+  assert.strictEqual(r.records[0].evidenceCited, true);
+  assert.deepStrictEqual([r.records[0].recalled, r.records[0].recallTotal], [1, 2]);
+  assert.deepStrictEqual([r.records[1].recalled, r.records[1].recallTotal], [0, 0]);
+  assert.strictEqual(r.records[1].activity, ACTIVITY_BY_QTYPE.inferential);
+  assert.deepStrictEqual(r.selfCorrections, ['미션 1 보완', '미션 1 인출 확인']);
+  const a = missionRecords(turns, missions, DEFAULT_FLOW, 'A');
+  assert.deepStrictEqual(a.boundary, [false, false]); // 경계 표시는 B에서만
+});
+
+test('missionRecords → summarize: v0.5 로그 형식을 지킨다(실험 흐름)', () => {
+  const turns = [0, 1, 2].map((i) => ans(i, { stage: 'first', verdict: 'pass', outcome: 'passed' }));
+  turns.push(
+    { mission_idx: 2, kind: 'recall', payload: { stage: 'predict', m: 2, jol: 0.625 } } as never,
+    { mission_idx: 2, kind: 'recall', payload: { stage: 'answer', m: 2, recalled: [1, 2], total: 2 } } as never,
+  );
+  const missions = [0, 1, 2].map((idx) => ({ idx, context_ids: ['a', 'b', 'c'] }));
+  const r = missionRecords(turns, missions, EXPERIMENT_FLOW, 'B');
+  const s = summarize({
+    model: 'm', condition: 'B', paperId: 'p', missions: r.records, recallPrediction: 0.625, newInfoInRecall: false,
+    selfCorrections: r.selfCorrections, readingLoad: 2, exitReason: null,
+  });
+  const res = check('```json\n' + JSON.stringify(s) + '\n```', { condition: 'B' });
+  assert.strictEqual(res.pass, true, res.reason);
+  assert.deepStrictEqual(s.text_units_provided, [3, 3, 3]);
+  assert.strictEqual(s.recall_actual, 1);
+});

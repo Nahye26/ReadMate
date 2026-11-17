@@ -31,7 +31,7 @@ flowchart LR
     Auth["Auth (익명 로그인)"]
     F1["ingest-source"]
     F2["plan-session"]
-    F3["submit-answer / recall / finish<br/>(M2)"]
+    F3["submit-answer / recall / finish-session"]
     DB[("Postgres + pgvector<br/>RLS")]
     EMB["내장 임베딩 gte-small"]
   end
@@ -76,8 +76,16 @@ flowchart LR
      | 많이 | 힌트 2단계 이상, **미해결** | 안내 +1(최대 2), 깊이 −1(최소 0) |
 
      시작은 안내 수준 2(읽기 전 안내 + 답변 틀), 깊이 0(이해). 질문 유형은 깊이에 가장 가까운 유형(같은 거리면 깊은 쪽)이고, 적응 모드의 마지막 미션은 최소 추론이다. 적응하지 않는 모드는 깊이 1로 고정한다. 안내 요청(`cueAsked`)은 서버에 기록이 없어 아직 반영하지 않는다.
-4. **인출·예측** (M2): 예측은 4지선다(0.125/0.375/0.625/0.875). 서버가 떠올린 핵심 수를 집계하고 `calibrate`로 판정한다.
-5. **종료** (M2): `summarize`가 v0.5 로그를 만들어 `sessions.summary`에 저장한다. 동의가 없으면 과제 안내문을 비운다.
+4. **인출·예측** (`recall`, 프롬프트 v0.5 1-7·2절): 모든 미션이 끝난 뒤 한 미션을 골라(통과한 추론·평가 미션 우선, 없으면 통과한 마지막, `pickRecallMission`) 원문을 가린 채 진행한다. 순서는 `start`(질문, 예측 선택지) → `predict`(4지선다 0.125/0.375/0.625/0.875, 쓰기 전에 받음) → `submit`(기억해서 쓴 글) → `fix`(원문과 비교해 고치기). `skip`은 어느 단계에서든 가능하다.
+   - 채점 범위는 핵심 발췌의 key_points뿐이다. LLM은 떠올린 핵심의 **번호**만 돌려주고, 서버가 맞은 수와 빠진 핵심 문장을 계산한다. 조건 B의 앞뒤 청크는 쓰지 않는다(`new_info_in_recall`은 항상 false).
+   - 응답에 떠올린 핵심 수, 빠진 핵심, 예측과의 차이(`calibrate`, ±0.25), 원문 발췌가 들어간다. 판정을 못 받으면(LLM 오류) 기록하지 않고 같은 글을 다시 낼 수 있다.
+   - 고쳐 쓰기(`fix`)에서 바뀌었으면 self_correction으로 센다. 답변 저장에 동의했으면 서버가 처음 글과 직접 비교하고, 동의가 없으면 글을 저장하지 않으므로 클라이언트가 보낸 `changed`를 쓴다.
+5. **종료** (`finish-session`, 프롬프트 v0.5 4절): 입력은 `reading_load`(1~5)와 중간 종료일 때의 `exit_reason`뿐이다. 서버가 `turns`에서 미션별 기록을 모아(`missionRecords`) v0.5 요약(`summarize`)을 만들어 `sessions.summary`에 저장하고 세션을 닫는다. 정상 종료는 미션과 인출이 모두 끝난(또는 건너뛴) 뒤에만 된다.
+   - `text_units_provided`는 `missions.context_ids`의 길이다. B에서 절 경계 때문에 앞뒤 청크가 모자란 미션은 `context_boundary`에 true로 남겨, 분석에서 따로 보거나 뺄 수 있다.
+   - 시작하지 않은 미션은 요약에서 빠지고, 끝나지 않은 채 종료한 미션은 미해결로 센다. 인출을 하지 않았으면 예측·실제·보정은 null이다.
+   - `self_corrections`: 보완한 답이 통과한 미션(`미션 N 보완`)과 인출에서 고쳐 쓴 경우(`미션 N 인출 확인`).
+   - 확인이 필요한 값: `activity_type`은 질문 유형에서 정한 대응(이해→근거 문장 찾기, 추론→생략된 의미 추론하기, 평가→주장과 근거 구분하기)이지 실제 활동을 판정한 값이 아니다. `context_sufficient`는 계획 단계에서 핵심 발췌만으로 답할 수 있는 질문만 남기므로 true로 채우며 별도로 점검한 값이 아니다.
+   - 같은 요청을 다시 보내면 저장된 요약을 돌려준다. 요약은 연구 동의와 관계없이 본인 세션에 저장되고, 연구자용 `research_summaries` 뷰는 동의한 세션만 보여 준다.
 
 ## 4. 데이터 모델
 
@@ -114,8 +122,9 @@ flowchart LR
 | `startLive`, `planLive` | `plan-session` (질문 세트 생성·재사용 포함) | 완료 (타입 검사만, 실행 미검증) |
 | 업로드·청킹(`pdfRead`, `textChunks`) | 추출은 클라이언트, 청킹·저장은 `ingest-source` | 완료 (미검증) |
 | `submit`, 힌트, `failMission` | `submit-answer` (데모와 달리 힌트는 요청 시에만, 보완은 1회) | 완료 (타입 검사만, 실행 미검증) |
-| `startRecall`, `submitRecall` | `recall` | M2 |
-| `summary`의 저장, 기록 패널 | `finish-session` + 클라이언트 | M2 |
+| `startRecall`, `submitRecall` | `recall` (예측 → 쓰기 → 원문 비교 후 고치기, 핵심 번호로 채점) | 완료 (타입 검사만, 실행 미검증) |
+| `summary`의 저장 | `finish-session` | 완료 (타입 검사만, 실행 미검증) |
+| 기록 패널 | 클라이언트 | M2 |
 | `claimStage`, `outlineStep`(과제 지원) | 별도 함수 | M3 이후, 범위 결정 필요 |
 
 ## 6. 실험 모드 (A/B 비교)
@@ -176,7 +185,7 @@ npx supabase login
 npx supabase link --project-ref gcqpbjyjpiryviulbbyq
 npx supabase db push                                   # 마이그레이션 적용 (init + question_sets 두 파일)
 npx supabase secrets set GEMINI_API_KEY=... GEMINI_MODEL=...   # 값은 터미널에서 직접 입력. 커밋 금지
-npx supabase functions deploy ingest-source plan-session submit-answer
+npx supabase functions deploy ingest-source plan-session submit-answer recall finish-session
 ```
 
 - Auth 설정에서 **Anonymous sign-ins**를 켜야 한다.
@@ -186,7 +195,7 @@ npx supabase functions deploy ingest-source plan-session submit-answer
 
 | 대상 | 방법 | 결과 |
 |---|---|---|
-| 핵심 로직 | `node --test supabase/functions/_shared/core.test.ts` | 17건 통과 (A 기준 계획 검증, B 확장, 발췌 해석, 미션 상태·보완·힌트 규칙, 요약 로그가 eval 검사기 통과) |
+| 핵심 로직 | `node --test supabase/functions/_shared/core.test.ts` | 25건 통과 (A 기준 계획 검증, B 확장, 발췌 해석, 미션 상태·보완·힌트 규칙, 인출 상태·대상 선택, 요약 조립, 요약 로그가 eval 검사기 통과) |
 | 로그 검사기 | `cd eval && node --test test/check_log.test.js` | 16건 통과 |
 | 기록-재생 평가 | `cd eval && npx promptfoo@latest eval -c promptfooconfig.yaml --no-cache` | 파일럿 2건 통과, 잘못된 로그는 FAIL 확인 |
 | Edge Function 타입 | `deno check` | 통과 |
@@ -198,7 +207,7 @@ npx supabase functions deploy ingest-source plan-session submit-answer
 | 단계 | 내용 |
 |---|---|
 | M1 (이번) | 스키마, 핵심 로직, `ingest-source`, `plan-session`, 평가 세트 |
-| M2 | `submit-answer`(복붙 감지, 판정, 힌트 사다리), `recall`, `finish-session`, 클라이언트 모듈화 |
+| M2 | `submit-answer`(복붙 감지, 판정, 힌트 사다리), `recall`, `finish-session`(함수는 완료), 클라이언트 모듈화 |
 | M3 | 실험 모드 완성: 질문 세트 고정, 조건 B 분량 규칙, 시행 로그 자동 수집 → `eval/runs` 연결 |
 | M4 | 배포 점검: 무료 한도, 동의서·IRB, 한국어 임베딩 모델 여부 |
 

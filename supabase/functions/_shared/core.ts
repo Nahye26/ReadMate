@@ -340,6 +340,113 @@ export function supportBefore(turns: TurnRec[], idx: number, flow: FlowOpts) {
   return cur;
 }
 
+/* ---------- 인출 확인 (recall) ---------- */
+// 미션을 모두 끝낸 뒤 한 미션을 골라, 원문을 가린 채 예측 → 기억해서 쓰기 → 원문과 비교해 고치기 순서로 진행한다.
+// 상태는 turns 기록(kind 'recall' / 'fix')에서 되살린다.
+//   recall {stage:'predict', m, jol} → recall {stage:'answer', m, recalled:[핵심 번호], total, actual} → fix {recall:true, changed}
+//   recall {stage:'skip'} 은 어느 단계에서든 가능하다.
+// 범위는 학생이 읽은 핵심 발췌의 key_points로 한정한다. 조건 B의 앞뒤 청크 내용은 채점하지 않는다(프롬프트 v0.5 1-7).
+
+export type RecallStage = 'none' | 'predicted' | 'answered' | 'done' | 'skipped';
+export type RecallState = {
+  stage: RecallStage;
+  m: number | null; // 인출 대상 미션 번호(0부터)
+  jol: number | null;
+  recalled: number[]; // 떠올린 핵심의 번호(1부터)
+  total: number; // 전체 핵심 수
+  fixed: boolean; // 원문과 비교해 답을 고쳤는가
+};
+
+export function recallState(turns: TurnRec[]): RecallState {
+  const st: RecallState = { stage: 'none', m: null, jol: null, recalled: [], total: 0, fixed: false };
+  for (const t of turns) {
+    const p = t.payload ?? {};
+    if (t.kind === 'recall') {
+      if (p.stage === 'skip') st.stage = 'skipped';
+      else if (p.stage === 'predict') {
+        st.stage = 'predicted';
+        st.m = Number.isInteger(p.m) ? p.m : null;
+        st.jol = typeof p.jol === 'number' ? p.jol : null;
+      } else if (p.stage === 'answer') {
+        st.stage = 'answered';
+        st.recalled = Array.isArray(p.recalled) ? p.recalled : [];
+        st.total = Number(p.total) || 0;
+      }
+    } else if (t.kind === 'fix' && p.recall === true) {
+      st.stage = st.stage === 'skipped' ? 'skipped' : 'done';
+      st.fixed = p.changed === true;
+    }
+  }
+  return st;
+}
+
+// 인출할 미션: 통과한 미션 중 추론·평가 질문이 있던 첫 미션, 없으면 통과한 마지막 미션. 통과한 미션이 없으면 null.
+// (index.html recallPick 이식. 미해결 미션은 핵심 요점을 이미 보여 주었으므로 제외한다.)
+export function pickRecallMission(turns: TurnRec[], total: number): number | null {
+  let first: number | null = null;
+  let last: number | null = null;
+  for (let i = 0; i < total; i++) {
+    const st = missionState(turns, i);
+    if (st.closed !== 'passed') continue;
+    last = i;
+    if (first === null && (st.qtype === 'inferential' || st.qtype === 'evaluative')) first = i;
+  }
+  return first ?? last;
+}
+
+// LLM이 돌려준 "떠올린 핵심 번호"를 1..n 범위의 중복 없는 정수로 정리한다.
+export function parseRecalled(raw: unknown, n: number): number[] {
+  if (!Array.isArray(raw)) return [];
+  return [...new Set(raw.map(Number).filter((k) => Number.isInteger(k) && k >= 1 && k <= n))].sort((a, b) => a - b);
+}
+
+/* ---------- 세션 요약 조립 (finish-session) ---------- */
+// R3 읽기 활동 이름. 질문 유형에서 정해 둔 대응이며, 학생이 실제로 한 활동을 판정한 값이 아니다. (연구팀 확인 필요)
+export const ACTIVITY_BY_QTYPE: Record<QType, string> = {
+  literal: '근거 문장 찾기',
+  inferential: '생략된 의미 추론하기',
+  evaluative: '주장과 근거 구분하기',
+};
+
+export type MissionRow = { idx: number; context_ids: string[] | null };
+
+// turns와 미션 정보에서 세션 요약 입력을 만든다. 시작하지 않은 미션(기록이 없는 미션)은 요약에 넣지 않는다.
+// 끝나지 않은 채 종료된 미션은 미해결로 센다.
+export function missionRecords(turns: TurnRec[], missions: MissionRow[], flow: FlowOpts, condition: Condition | null) {
+  const rec = recallState(turns);
+  const records: MissionRecord[] = [];
+  const selfCorrections: string[] = [];
+  const boundary: boolean[] = []; // B에서 같은 절 경계 때문에 앞뒤 청크가 모자란 미션. 분석에서 따로 볼 수 있게 남긴다.
+  for (const m of missions) {
+    const st = missionState(turns, m.idx);
+    const mine = turns.filter((t) => t.mission_idx === m.idx);
+    if (!mine.length || !st.qtype) continue;
+    const answers = mine.filter((t) => t.kind === 'answer' && !t.payload?.copy);
+    const recalled = rec.m === m.idx && rec.stage !== 'skipped' ? rec.recalled.length : 0;
+    const recallTotal = rec.m === m.idx && rec.stage !== 'skipped' ? rec.total : 0;
+    const units = Math.max(1, m.context_ids?.length ?? 1);
+    records.push({
+      supportLevel: supportBefore(turns, m.idx, flow).sup,
+      qtype: st.qtype,
+      hintLevel: st.hintLevel,
+      unresolved: st.closed !== 'passed',
+      textUnits: units,
+      contextSufficient: true, // 계획 단계에서 핵심 발췌만으로 답할 수 있는 질문만 남긴다. 따로 점검한 값은 아니다.
+      contextUsed: answers.some((t) => t.payload?.used_context === true),
+      evidenceCited: answers.some((t) => t.payload?.evidence_cited === true),
+      activity: ACTIVITY_BY_QTYPE[st.qtype],
+      recalled,
+      recallTotal,
+    });
+    boundary.push(condition === 'B' && units < MAX_TEXT_UNITS);
+    if (answers.some((t) => t.payload?.stage === 'revision' && t.payload?.outcome === 'passed')) {
+      selfCorrections.push(`미션 ${m.idx + 1} 보완`);
+    }
+  }
+  if (rec.stage === 'done' && rec.fixed && rec.m !== null) selfCorrections.push(`미션 ${rec.m + 1} 인출 확인`);
+  return { records, selfCorrections, boundary, recall: rec };
+}
+
 /* ---------- 회상 보정 ---------- */
 
 export type Calibration = '과대' | '비슷' | '과소';
