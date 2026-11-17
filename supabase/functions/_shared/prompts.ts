@@ -114,23 +114,26 @@ export function buildHintPrompt(o: {
   );
 }
 
-// 인출 확인(프롬프트 v0.5 1-7): 학생이 원문을 보지 않고 쓴 글을 핵심 요소와 견준다.
-// 채점 범위는 핵심 발췌의 핵심 요소뿐이다. 조건 B의 앞뒤 청크나 발췌에 없는 내용은 요구하지 않는다.
-// 떠올린 핵심은 번호로 받아 서버가 센다. 빠진 핵심 문장은 서버가 keys에서 꺼낸다.
+// 인출 확인(프롬프트 v0.5 2절): 세 미션 전체를 한 번에. 학생이 원문을 보지 않고 쓴 글을 미션별 핵심 요소와 견준다.
+// 채점 범위는 학생이 읽은 근거 범위의 핵심 요소뿐이다. 조건 B의 앞뒤 청크나 범위에 없는 내용은 요구하지 않는다.
+// 핵심 요소는 미션을 가로질러 1부터 이어 붙인 번호로 받고, 떠올린 번호만 돌려받는다. 빠진 핵심 문장은 학생에게 보여 주지 않는다.
 export function buildRecallPrompt(o: {
-  question: string;
-  keys: string[];
-  core: { sentences: string[]; from: number };
+  missions: { question: string; keys: string[]; core: { sentences: string[]; from: number } }[];
   answer: string;
 }) {
+  let n = 0;
+  const blocks = o.missions
+    .map((m, i) =>
+      `미션 ${i + 1} 질문: ${m.question}\n읽은 범위: ${numbered(m.core.sentences, m.core.from)}\n` +
+      m.keys.map((k) => `${++n}. ${k}`).join('\n')
+    )
+    .join('\n\n');
   return (
     RULES +
-    '학생이 원문을 보지 않고 기억해서 썼습니다. 핵심 요소 기준으로 확인하세요.\n\n' +
-    `[핵심 발췌]\n${numbered(o.core.sentences, o.core.from)}\n\n` +
-    `[핵심 요소: 번호 순서대로 판정 기준]\n${o.keys.map((k, i) => `${i + 1}. ${k}`).join('\n')}\n\n` +
-    `[질문]\n${o.question}\n\n[학생이 기억해서 쓴 답]\n${o.answer}\n\n` +
-    '학생이 자기 말로라도 담은 핵심 요소의 번호를 모두 고르세요. 핵심 요소에 없는 내용을 요구하거나 감점하지 않습니다.\n' +
-    '- comment: 학습자를 평가하는 말투가 아니라 한 문장 안내로. 빠진 핵심의 문장을 그대로 쓰지 않습니다.\n' +
-    'JSON만 출력: {"recalled":[1],"comment":"..."}'
+    '학생이 원문을 보지 않고 방금 읽은 내용을 기억나는 대로 썼습니다. 핵심 요소 기준으로 확인하세요.\n\n' +
+    `[핵심 요소: 번호가 이어집니다. 판정 기준이며 학생에게 공개하지 않음]\n${blocks}\n\n` +
+    `[학생이 기억해서 쓴 글]\n${o.answer}\n\n` +
+    '학생이 자기 말로라도 담은 핵심 요소의 번호를 모두 고르세요. 핵심 요소에 없는 내용을 요구하거나 감점하지 않고, 글이 짧거나 서툴러도 담은 요소는 인정합니다.\n' +
+    'JSON만 출력: {"recalled":[1,3]}'
   );
 }

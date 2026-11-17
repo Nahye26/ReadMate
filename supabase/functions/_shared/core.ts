@@ -347,57 +347,60 @@ export function supportBefore(turns: TurnRec[], idx: number, flow: FlowOpts) {
 }
 
 /* ---------- 인출 확인 (recall) ---------- */
-// 미션을 모두 끝낸 뒤 한 미션을 골라, 원문을 가린 채 예측 → 기억해서 쓰기 → 원문과 비교해 고치기 순서로 진행한다.
-// 상태는 turns 기록(kind 'recall' / 'fix')에서 되살린다.
-//   recall {stage:'predict', m, jol} → recall {stage:'answer', m, recalled:[핵심 번호], total, actual} → fix {recall:true, changed}
+// 미션을 모두 끝낸 뒤 세 미션 전체를 통합해 확인한다(프롬프트 v0.5 2절, Figma 흐름): 예측 → 원문을 가리고 기억나는 대로 쓰기 → 결과.
+// 쓰고 나서 원문과 비교해 다시 고쳐 쓰게 하지 않는다. 학생 피드백("완전한 답을 낼 때까지 계속 다듬게 해서 답답함")을 반영했다.
+// 상태는 turns 기록(kind 'recall')에서 되살린다.
+//   recall {stage:'predict', jol} → recall {stage:'answer', per:[{m, recalled, total}], recalled, total, actual}
 //   recall {stage:'skip'} 은 어느 단계에서든 가능하다.
-// 범위는 학생이 읽은 핵심 발췌의 key_points로 한정한다. 조건 B의 앞뒤 청크 내용은 채점하지 않는다(프롬프트 v0.5 1-7).
+// 범위는 통과한 미션의 key_points(근거 범위 안의 내용)로 한정한다. 미해결 미션은 이미 핵심을 보여 주었으므로 제외한다.
+// 조건 B의 앞뒤 청크 내용은 채점하지 않는다(프롬프트 v0.5 1-7).
 
-export type RecallStage = 'none' | 'predicted' | 'answered' | 'done' | 'skipped';
+export type RecallStage = 'none' | 'predicted' | 'answered' | 'skipped';
+export type RecallPer = { m: number; recalled: number; total: number };
 export type RecallState = {
   stage: RecallStage;
-  m: number | null; // 인출 대상 미션 번호(0부터)
   jol: number | null;
-  recalled: number[]; // 떠올린 핵심의 번호(1부터)
-  total: number; // 전체 핵심 수
-  fixed: boolean; // 원문과 비교해 답을 고쳤는가
+  per: RecallPer[]; // 미션별 떠올린 핵심 수 / 전체 핵심 수
+  recalled: number;
+  total: number;
 };
 
 export function recallState(turns: TurnRec[]): RecallState {
-  const st: RecallState = { stage: 'none', m: null, jol: null, recalled: [], total: 0, fixed: false };
+  const st: RecallState = { stage: 'none', jol: null, per: [], recalled: 0, total: 0 };
   for (const t of turns) {
+    if (t.kind !== 'recall') continue;
     const p = t.payload ?? {};
-    if (t.kind === 'recall') {
-      if (p.stage === 'skip') st.stage = 'skipped';
-      else if (p.stage === 'predict') {
-        st.stage = 'predicted';
-        st.m = Number.isInteger(p.m) ? p.m : null;
-        st.jol = typeof p.jol === 'number' ? p.jol : null;
-      } else if (p.stage === 'answer') {
-        st.stage = 'answered';
-        st.recalled = Array.isArray(p.recalled) ? p.recalled : [];
-        st.total = Number(p.total) || 0;
-      }
-    } else if (t.kind === 'fix' && p.recall === true) {
-      st.stage = st.stage === 'skipped' ? 'skipped' : 'done';
-      st.fixed = p.changed === true;
+    if (p.stage === 'skip') st.stage = 'skipped';
+    else if (p.stage === 'predict') {
+      st.stage = 'predicted';
+      st.jol = typeof p.jol === 'number' ? p.jol : null;
+    } else if (p.stage === 'answer') {
+      st.stage = 'answered';
+      st.per = Array.isArray(p.per) ? p.per : [];
+      st.recalled = Number(p.recalled) || 0;
+      st.total = Number(p.total) || 0;
     }
   }
   return st;
 }
 
-// 인출할 미션: 통과한 미션 중 추론·평가 질문이 있던 첫 미션, 없으면 통과한 마지막 미션. 통과한 미션이 없으면 null.
-// (index.html recallPick 이식. 미해결 미션은 핵심 요점을 이미 보여 주었으므로 제외한다.)
-export function pickRecallMission(turns: TurnRec[], total: number): number | null {
-  let first: number | null = null;
-  let last: number | null = null;
-  for (let i = 0; i < total; i++) {
-    const st = missionState(turns, i);
-    if (st.closed !== 'passed') continue;
-    last = i;
-    if (first === null && (st.qtype === 'inferential' || st.qtype === 'evaluative')) first = i;
-  }
-  return first ?? last;
+// 인출 대상: 통과한 미션 전체(번호 순). 통과한 미션이 없으면 빈 배열이고 인출은 건너뛴다.
+export function recallTargets(turns: TurnRec[], total: number): number[] {
+  const out: number[] = [];
+  for (let i = 0; i < total; i++) if (missionState(turns, i).closed === 'passed') out.push(i);
+  return out;
+}
+
+// 여러 미션의 핵심 요소에 이어서 붙인 번호(1부터)로 LLM이 돌려준 "떠올린 핵심"을 미션별로 센다.
+export function tallyRecall(groups: { m: number; keys: number }[], recalled: number[]): { per: RecallPer[]; recalled: number; total: number } {
+  let start = 0;
+  const per = groups.map((g) => {
+    const lo = start + 1;
+    const hi = start + g.keys;
+    start = hi;
+    return { m: g.m, recalled: recalled.filter((k) => k >= lo && k <= hi).length, total: g.keys };
+  });
+  return { per, recalled: per.reduce((n, x) => n + x.recalled, 0), total: per.reduce((n, x) => n + x.total, 0) };
 }
 
 // LLM이 돌려준 "떠올린 핵심 번호"를 1..n 범위의 중복 없는 정수로 정리한다.
@@ -434,8 +437,9 @@ export function missionRecords(turns: TurnRec[], missions: MissionRow[], flow: F
     const mine = turns.filter((t) => t.mission_idx === m.idx);
     if (!mine.length || !st.qtype) continue;
     const answers = mine.filter((t) => t.kind === 'answer' && !t.payload?.copy);
-    const recalled = rec.m === m.idx && rec.stage !== 'skipped' ? rec.recalled.length : 0;
-    const recallTotal = rec.m === m.idx && rec.stage !== 'skipped' ? rec.total : 0;
+    const per = rec.stage === 'answered' ? rec.per.find((x) => x.m === m.idx) : undefined;
+    const recalled = per?.recalled ?? 0;
+    const recallTotal = per?.total ?? 0;
     const units = Math.max(1, m.context_ids?.length ?? 1);
     records.push({
       supportLevel: supportBefore(turns, m.idx, flow).sup,
@@ -458,7 +462,6 @@ export function missionRecords(turns: TurnRec[], missions: MissionRow[], flow: F
       selfCorrections.push(`미션 ${m.idx + 1} 보완`);
     }
   }
-  if (rec.stage === 'done' && rec.fixed && rec.m !== null) selfCorrections.push(`미션 ${rec.m + 1} 인출 확인`);
   return { records, selfCorrections, boundary, evidenceCounts, idxs, recall: rec };
 }
 

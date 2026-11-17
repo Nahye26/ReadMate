@@ -3,13 +3,13 @@
 //   reading_load: 오늘 읽기 분량과 난이도(1 가벼움 ~ 5 매우 부담). 프롬프트 v0.5 4절.
 //   exit_reason:  중간에 그만둘 때만 보낸다. 있으면 미션·인출이 끝나지 않았어도 지금까지의 기록으로 요약한다.
 // 서버가 turns 기록에서 eval/ 의 v0.5 로그 스키마(summary)를 만들어 sessions.summary에 저장하고 세션을 닫는다. 클라이언트가 보낸 값은 reading_load와 exit_reason뿐이다.
-//   - 정상 종료는 모든 미션이 끝나고 인출이 끝났거나(고침까지) 건너뛴 뒤에만 가능하다. 통과한 미션이 없어 인출이 불가능한 경우는 인출 없이 종료할 수 있다.
+//   - 정상 종료는 모든 미션이 끝나고 인출이 끝났거나 건너뛴 뒤에만 가능하다. 통과한 미션이 없어 인출이 불가능한 경우는 인출 없이 종료할 수 있다.
 //   - 시작하지 않은 미션은 요약에 넣지 않는다. 끝나지 않은 채 종료된 미션은 미해결로 센다.
 //   - text_units_provided는 missions.context_ids의 길이다. 조건 B에서 절 경계 때문에 앞뒤 청크가 모자란 미션은 context_boundary에 true로 남겨 분석에서 따로 볼 수 있다.
 //   - 같은 요청을 다시 보내면(이미 닫힌 세션) 저장된 요약을 그대로 돌려준다.
 // 요약은 연구 동의(consent_research)와 관계없이 본인 세션에 저장된다. 연구자용 research_summaries 뷰는 동의한 세션만 보여 준다.
 import {
-  currentMission, DEFAULT_FLOW, missionRecords, pickRecallMission, recallState, summarize, type Condition, type FlowOpts,
+  currentMission, DEFAULT_FLOW, missionRecords, recallState, recallTargets, summarize, type Condition, type FlowOpts,
 } from '../_shared/core.ts';
 import { authedUser, corsHeaders, json, serviceClient } from '../_shared/http.ts';
 
@@ -56,7 +56,7 @@ Deno.serve(async (req) => {
       return json({ error: 'missions_not_done', message: '미션이 끝나지 않았습니다. 그만두려면 exit_reason을 보내세요' }, 409);
     }
     const rs = recallState(history).stage;
-    if (pickRecallMission(history, total) !== null && rs !== 'done' && rs !== 'skipped') {
+    if (recallTargets(history, total).length && rs !== 'answered' && rs !== 'skipped') {
       return json({ error: 'recall_pending', stage: rs, message: '인출 확인을 끝내거나 건너뛴 뒤에 종료할 수 있습니다' }, 409);
     }
   }

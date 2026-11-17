@@ -267,33 +267,36 @@ test('요약 로그 값: 미해결·힌트 집계와 회상 계산', () => {
 });
 
 /* ---------- 인출 확인 · 세션 요약 ---------- */
-import { recallState, pickRecallMission, parseRecalled, missionRecords, ACTIVITY_BY_QTYPE } from './core.ts';
+import { recallState, recallTargets, tallyRecall, parseRecalled, missionRecords, ACTIVITY_BY_QTYPE } from './core.ts';
 
 const ans = (m: number, p: object) => ({ mission_idx: m, kind: 'answer', payload: { qtype: 'literal', ...p } });
 const hint = (m: number, level: number) => ({ mission_idx: m, kind: 'hint', payload: { qtype: 'literal', level } });
 
 test('recallState: 기록에서 단계를 되살린다', () => {
   assert.strictEqual(recallState([]).stage, 'none');
-  const p = { mission_idx: 1, kind: 'recall', payload: { stage: 'predict', m: 1, jol: 0.625 } };
-  assert.deepStrictEqual(recallState([p]).jol, 0.625);
-  const a = { mission_idx: 1, kind: 'recall', payload: { stage: 'answer', m: 1, recalled: [1, 3], total: 3 } };
+  const p = { mission_idx: null, kind: 'recall', payload: { stage: 'predict', jol: 0.625 } };
+  assert.strictEqual(recallState([p]).jol, 0.625);
+  const a = {
+    mission_idx: null, kind: 'recall',
+    payload: { stage: 'answer', per: [{ m: 0, recalled: 1, total: 2 }, { m: 2, recalled: 2, total: 2 }], recalled: 3, total: 4 },
+  };
   const st = recallState([p, a]);
   assert.strictEqual(st.stage, 'answered');
-  assert.deepStrictEqual(st.recalled, [1, 3]);
-  assert.strictEqual(recallState([p, a, { mission_idx: 1, kind: 'fix', payload: { recall: true, changed: true } }]).stage, 'done');
+  assert.deepStrictEqual([st.recalled, st.total, st.per.length], [3, 4, 2]);
   assert.strictEqual(recallState([p, { mission_idx: null, kind: 'recall', payload: { stage: 'skip' } }]).stage, 'skipped');
 });
 
-test('pickRecallMission: 통과한 추론·평가 미션 우선, 없으면 통과한 마지막, 미해결은 제외', () => {
+test('recallTargets: 통과한 미션만(미해결 제외), tallyRecall: 이어 붙인 번호를 미션별로 센다', () => {
   const t = [
     ans(0, { qtype: 'literal', outcome: 'passed' }),
     ans(1, { qtype: 'inferential', outcome: 'unresolved' }),
     ans(2, { qtype: 'literal', outcome: 'passed' }),
   ];
-  assert.strictEqual(pickRecallMission(t, 3), 2); // 통과한 마지막(추론은 미해결이라 제외)
-  t.push(ans(3, { qtype: 'evaluative', outcome: 'passed' }));
-  assert.strictEqual(pickRecallMission(t, 4), 3);
-  assert.strictEqual(pickRecallMission([ans(0, { outcome: 'unresolved' })], 1), null);
+  assert.deepStrictEqual(recallTargets(t, 3), [0, 2]);
+  assert.deepStrictEqual(recallTargets([ans(0, { outcome: 'unresolved' })], 1), []);
+  const r = tallyRecall([{ m: 0, keys: 2 }, { m: 2, keys: 2 }], [2, 3, 4]);
+  assert.deepStrictEqual(r.per, [{ m: 0, recalled: 1, total: 2 }, { m: 2, recalled: 2, total: 2 }]);
+  assert.deepStrictEqual([r.recalled, r.total], [3, 4]);
 });
 
 test('parseRecalled: 범위 밖·중복·문자열을 걸러 낸다', () => {
@@ -308,9 +311,8 @@ test('missionRecords: 힌트·보완·인출·경계 청크를 기록에서 모�
     ans(0, { stage: 'revision', verdict: 'pass', outcome: 'passed', evidence_cited: true, used_context: true }),
     ans(1, { qtype: 'inferential', stage: 'first', verdict: 'fail', outcome: 'revise' }),
     ans(1, { qtype: 'inferential', stage: 'revision', verdict: 'fail', outcome: 'unresolved' }),
-    { mission_idx: 0, kind: 'recall', payload: { stage: 'predict', m: 0, jol: 0.875 } },
-    { mission_idx: 0, kind: 'recall', payload: { stage: 'answer', m: 0, recalled: [1], total: 2 } },
-    { mission_idx: 0, kind: 'fix', payload: { recall: true, changed: true } },
+    { mission_idx: null, kind: 'recall', payload: { stage: 'predict', jol: 0.875 } },
+    { mission_idx: null, kind: 'recall', payload: { stage: 'answer', per: [{ m: 0, recalled: 1, total: 2 }], recalled: 1, total: 2 } },
   ];
   const missions = [
     { idx: 0, context_ids: ['a', 'b', 'c'] },
@@ -328,7 +330,7 @@ test('missionRecords: 힌트·보완·인출·경계 청크를 기록에서 모�
   assert.deepStrictEqual([r.records[0].recalled, r.records[0].recallTotal], [1, 2]);
   assert.deepStrictEqual([r.records[1].recalled, r.records[1].recallTotal], [0, 0]);
   assert.strictEqual(r.records[1].activity, ACTIVITY_BY_QTYPE.inferential);
-  assert.deepStrictEqual(r.selfCorrections, ['미션 1 보완', '미션 1 인출 확인']);
+  assert.deepStrictEqual(r.selfCorrections, ['미션 1 보완']);
   const a = missionRecords(turns, missions, DEFAULT_FLOW, 'A');
   assert.deepStrictEqual(a.boundary, [false, false]); // 경계 표시는 B에서만
 });
@@ -336,8 +338,8 @@ test('missionRecords: 힌트·보완·인출·경계 청크를 기록에서 모�
 test('missionRecords → summarize: v0.5 로그 형식을 지킨다(실험 흐름)', () => {
   const turns = [0, 1, 2].map((i) => ans(i, { stage: 'first', verdict: 'pass', outcome: 'passed' }));
   turns.push(
-    { mission_idx: 2, kind: 'recall', payload: { stage: 'predict', m: 2, jol: 0.625 } } as never,
-    { mission_idx: 2, kind: 'recall', payload: { stage: 'answer', m: 2, recalled: [1, 2], total: 2 } } as never,
+    { mission_idx: null, kind: 'recall', payload: { stage: 'predict', jol: 0.625 } } as never,
+    { mission_idx: null, kind: 'recall', payload: { stage: 'answer', per: [{ m: 0, recalled: 1, total: 1 }, { m: 1, recalled: 1, total: 1 }, { m: 2, recalled: 1, total: 1 }], recalled: 3, total: 3 } } as never,
   );
   const missions = [0, 1, 2].map((idx) => ({ idx, context_ids: ['a', 'b', 'c'] }));
   const r = missionRecords(turns, missions, EXPERIMENT_FLOW, 'B');
