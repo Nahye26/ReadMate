@@ -409,6 +409,21 @@ export function parseRecalled(raw: unknown, n: number): number[] {
   return [...new Set(raw.map(Number).filter((k) => Number.isInteger(k) && k >= 1 && k <= n))].sort((a, b) => a - b);
 }
 
+/* ---------- 연결 제안 (connect, 선택) ---------- */
+// 프롬프트 v0.5 3절: 앞선 미션 내용과 과제의 개념·사례·시사점이 이어질 수 있을 때만 학생에게 한 번 제안한다. 건너뛸 수 있고 억지로 연결하지 않는다.
+// 서버는 통과한 미션이 2개 이상일 때만 제안한다(이어 볼 대상이 둘 이상 있어야 한다). 인출이 끝났거나 건너뛴 뒤에 한다.
+// 상태는 turns 기록(kind 'connect')에서 되살린다: {stage:'answer', len} 또는 {stage:'skip'}.
+export type ConnectStage = 'none' | 'answered' | 'skipped';
+export function connectState(turns: TurnRec[]): ConnectStage {
+  let st: ConnectStage = 'none';
+  for (const t of turns) {
+    if (t.kind !== 'connect') continue;
+    st = t.payload?.stage === 'skip' ? 'skipped' : t.payload?.stage === 'answer' ? 'answered' : st;
+  }
+  return st;
+}
+export const CONNECT_MIN_MISSIONS = 2;
+
 /* ---------- 세션 요약 조립 (finish-session) ---------- */
 // R3 읽기 활동 이름. 질문 유형에서 정해 둔 대응이며, 학생이 실제로 한 활동을 판정한 값이 아니다. (연구팀 확인 필요)
 // 질문 신고 사유(Figma: '이 질문이 이상해요', '답할 수 없어요', '원문과 달라요', '너무 쉬워요')

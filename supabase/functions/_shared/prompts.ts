@@ -137,3 +137,16 @@ export function buildRecallPrompt(o: {
     'JSON만 출력: {"recalled":[1,3]}'
   );
 }
+
+// 연결 제안(프롬프트 v0.5 3절): 학생이 쓴 연결에 대해 근거를 텍스트에서 다시 찾게 하는 짧은 한마디. 과제 답안이나 연결 문장을 대신 쓰지 않는다.
+export function buildConnectPrompt(o: { missions: { n: number; req: string; question: string }[]; connection: string }) {
+  return (
+    RULES +
+    '학생이 앞선 미션의 내용을 과제에서 어떻게 이어 볼지 직접 썼습니다.\n\n' +
+    `[학생이 읽은 미션]\n${o.missions.map((m) => `미션 ${m.n} (${m.req}): ${m.question}`).join('\n')}\n\n` +
+    `[학생이 쓴 연결]\n${o.connection}\n\n` +
+    '한두 문장으로 답하세요. 학생의 연결 중 구체적인 부분을 하나 짚어 인정하고, 그 연결이 어느 미션의 어떤 근거에 기대는지 학생이 원문에서 다시 찾아보게 묻습니다. ' +
+    '연결 문장이나 과제 답안을 대신 쓰지 않고, 연결이 약하다고 평가하지 않습니다.\n' +
+    'JSON만 출력: {"comment":"..."}'
+  );
+}

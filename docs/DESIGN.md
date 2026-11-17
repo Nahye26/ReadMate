@@ -83,6 +83,7 @@ flowchart LR
    - 채점 범위는 통과한 미션의 key_points(근거 범위 안의 내용)뿐이다. 미해결 미션은 핵심을 이미 보여 줬으므로 제외한다. 조건 B의 앞뒤 청크는 쓰지 않는다(`new_info_in_recall`은 항상 false).
    - AI는 미션을 가로질러 이어 붙인 핵심 번호 중 떠올린 번호만 돌려주고, 서버가 미션별·전체 맞은 수(`tallyRecall`), 실제 비율, 예측과의 차이(`calibrate`, ±0.25)를 계산한다. 판정을 못 받으면(LLM 오류) 기록하지 않고 같은 글을 다시 낼 수 있다.
    - **한 번 쓰면 끝이다.** 빠진 핵심 문장을 보여 주지 않고, 원문과 비교해 고쳐 쓰게 하지도 않으며, 맞고 틀림을 글에 표시하지 않는다. 학생 피드백("완전한 답을 낼 때까지 계속 다듬게 해서 답답함", "갑자기 새로운 내용이 나옴")을 반영했다. 응답은 맞은 수와 예측 비교뿐이다.
+   - **연결 제안(선택)** (`connect`, 프롬프트 v0.5 3절): 인출이 끝나거나 건너뛴 뒤, 통과한 미션이 2개 이상일 때만 "앞에서 읽은 개념과 사례를 과제에서 어떻게 이어 볼 수 있을까요?"를 한 번 제안한다(`start`). 학생이 쓰면(`submit`) 연결 문장을 대신 쓰지 않고, 그 연결이 어느 미션의 어떤 근거에 기대는지 원문에서 다시 찾아보게 묻는 한두 문장만 돌려준다. 건너뛰기(`skip`)가 가능하고 종료의 조건이 아니다. 기록은 `turns.kind = 'connect'`(마이그레이션 `20261118000000_turns_connect.sql`), 요약에는 `connection`(answered / skipped / none)으로 남는다. 학생 피드백(과제의 개념·사례·시사점이 앞 미션과 이어지지 않고 각각 추천됨)을 반영했다.
 5. **종료** (`finish-session`, 프롬프트 v0.5 4절): 입력은 `reading_load`(1~5)와 중간 종료일 때의 `exit_reason`뿐이다. 서버가 `turns`에서 미션별 기록을 모아(`missionRecords`) v0.5 요약(`summarize`)을 만들어 `sessions.summary`에 저장하고 세션을 닫는다. 정상 종료는 미션과 인출이 모두 끝난(또는 건너뛴) 뒤에만 된다.
    - `text_units_provided`는 `missions.context_ids`의 길이다. B에서 절 경계 때문에 앞뒤 청크가 모자란 미션은 `context_boundary`에 true로 남겨, 분석에서 따로 보거나 뺄 수 있다.
    - `evidence_count`는 미션별로 학생이 고른 근거 문장 수(마지막 답 기준), `question_reports`는 미션별 질문 신고 사유 배열이다.
@@ -93,7 +94,7 @@ flowchart LR
 
 ## 4. 데이터 모델
 
-마이그레이션: `supabase/migrations/20261105000000_init.sql`, `20261117000000_question_sets.sql`(질문 세트·공유 자료·제공 청크)
+마이그레이션: `supabase/migrations/20261105000000_init.sql`, `20261117000000_question_sets.sql`(질문 세트·공유 자료·제공 청크), `20261118000000_turns_connect.sql`(turns.kind에 connect)
 
 | 테이블 | 용도 | 클라이언트 접근 |
 |---|---|---|
@@ -189,7 +190,7 @@ npx supabase login
 npx supabase link --project-ref gcqpbjyjpiryviulbbyq
 npx supabase db push                                   # 마이그레이션 적용 (init + question_sets 두 파일)
 npx supabase secrets set GEMINI_API_KEY=... GEMINI_MODEL=...   # 값은 터미널에서 직접 입력. 커밋 금지
-npx supabase functions deploy ingest-source plan-session submit-answer recall finish-session
+npx supabase functions deploy ingest-source plan-session submit-answer report-question recall connect finish-session
 ```
 
 - Auth 설정에서 **Anonymous sign-ins**를 켜야 한다.
@@ -199,7 +200,7 @@ npx supabase functions deploy ingest-source plan-session submit-answer recall fi
 
 | 대상 | 방법 | 결과 |
 |---|---|---|
-| 핵심 로직 | `node --test supabase/functions/_shared/core.test.ts` | 25건 통과 (A 기준 계획 검증, B 확장, 발췌 해석, 미션 상태·보완·힌트 규칙, 인출 상태·대상 선택, 요약 조립, 요약 로그가 eval 검사기 통과) |
+| 핵심 로직 | `node --test supabase/functions/_shared/core.test.ts` | 28건 통과 (A 기준 계획 검증, B 확장, 발췌 해석, 미션 상태·보완·힌트 규칙, 인출 상태·대상 선택, 요약 조립, 요약 로그가 eval 검사기 통과) |
 | 로그 검사기 | `cd eval && node --test test/check_log.test.js` | 16건 통과 |
 | 기록-재생 평가 | `cd eval && npx promptfoo@latest eval -c promptfooconfig.yaml --no-cache` | 파일럿 2건 통과, 잘못된 로그는 FAIL 확인 |
 | Edge Function 타입 | `deno check` | 통과 |

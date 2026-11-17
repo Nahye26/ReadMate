@@ -9,7 +9,7 @@
 //   - 같은 요청을 다시 보내면(이미 닫힌 세션) 저장된 요약을 그대로 돌려준다.
 // 요약은 연구 동의(consent_research)와 관계없이 본인 세션에 저장된다. 연구자용 research_summaries 뷰는 동의한 세션만 보여 준다.
 import {
-  currentMission, DEFAULT_FLOW, missionRecords, recallState, recallTargets, summarize, type Condition, type FlowOpts,
+  connectState, currentMission, DEFAULT_FLOW, missionRecords, recallState, recallTargets, summarize, type Condition, type FlowOpts,
 } from '../_shared/core.ts';
 import { authedUser, corsHeaders, json, serviceClient } from '../_shared/http.ts';
 
@@ -86,6 +86,8 @@ Deno.serve(async (req) => {
     ...(noRecall ? { recall_prediction: null, recall_actual: null, calibration: null, calibration_gap: null } : {}),
     // 미션별 질문 신고 사유(없으면 빈 배열). 사용성 테스트에서 질문 품질을 볼 때 쓴다.
     question_reports: idxs.map((i) => (reports ?? []).filter((r) => (r.data as { m?: number }).m === i + 1).map((r) => (r.data as { reason: string }).reason)),
+    // 연결 제안(선택): 쓴 경우 answered, 건너뛴 경우 skipped, 제안하지 않았거나 하지 못한 경우 none
+    connection: connectState(history),
     evidence_count: evidenceCounts, // 미션별 학생이 고른 근거 문장 수
     context_boundary: boundary, // B에서 같은 절 경계로 앞뒤 청크가 모자란 미션(분석에서 제외 후보)
   };

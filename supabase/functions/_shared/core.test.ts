@@ -372,3 +372,10 @@ test('missionRecords: 근거 문장 수는 마지막 답의 선택 수', () => {
   const r = missionRecords(t, [{ idx: 0, context_ids: ['a'] }, { idx: 1, context_ids: ['b'] }], DEFAULT_FLOW, 'B');
   assert.deepStrictEqual(r.evidenceCounts, [2, 0]);
 });
+
+test('connectState: 연결 단계 기록', async () => {
+  const { connectState } = await import('./core.ts');
+  assert.strictEqual(connectState([]), 'none');
+  assert.strictEqual(connectState([{ mission_idx: null, kind: 'connect', payload: { stage: 'skip' } }]), 'skipped');
+  assert.strictEqual(connectState([{ mission_idx: null, kind: 'connect', payload: { stage: 'answer' } }]), 'answered');
+});
