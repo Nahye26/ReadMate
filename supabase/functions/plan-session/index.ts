@@ -8,10 +8,10 @@
 //   3) sessions / missions / mission_secrets 저장
 // 출력: 학생에게 보여 줄 미션(발췌 원문, 질문 변형). 판정 기준(key_points)은 응답에 포함하지 않는다.
 import {
-  CONFIG, cleanPlan, contextIds, DEFAULT_FLOW, estimateMins, EXPERIMENT_FLOW, normalizeAssignment, pickQtype, resolveExcerpts,
+  CONFIG, cleanPlan, extractReqs, contextIds, DEFAULT_FLOW, estimateMins, EXPERIMENT_FLOW, normalizeAssignment, pickQtype, resolveExcerpts,
   basisFor, type Basis, type Chunk, type ChunkRef, type Condition, type PlanData,
 } from '../_shared/core.ts';
-import { embed, EmbedError, toVector } from '../_shared/embed.ts';
+import { EmbedError, embedMany, toVector } from '../_shared/embed.ts';
 import { authedUser, corsHeaders, json, serviceClient } from '../_shared/http.ts';
 import { askJson, LlmError } from '../_shared/llm.ts';
 import { buildPlanPrompt } from '../_shared/prompts.ts';
@@ -48,29 +48,58 @@ async function questionSetFor(
     if (found.data) return found.data as { id: string; plan: PlanData };
   }
 
-  // 후보는 검색 결과 그대로다. 앞뒤 청크는 계획 단계에서 보여 주지 않는다(A 기준 입력).
-  let queryVec: string;
-  try {
-    queryVec = toVector(await embed(a.assignment, 'RETRIEVAL_QUERY'));
-  } catch (e) {
-    if (e instanceof EmbedError) throw new PlanError(e.code === 'embed_failed' ? 502 : 429, e.code === 'embed_failed' ? 'embed_failed' : e.code, e.message);
-    throw e;
-  }
-  const { data: hits, error: hitErr } = await db.rpc('match_chunks', {
-    p_source: a.sourceId,
-    p_query: queryVec,
-    p_k: TOP_K,
-  });
-  if (hitErr || !hits?.length) throw new PlanError(500, 'retrieval_failed', hitErr?.message);
-  const candidates = (hits as Row[]).slice().sort((x, y) => x.idx - y.idx).map(toChunk);
+  // 후보: 안내문에서 번호 붙은 요구 항목(2~4개)을 뽑을 수 있으면 항목마다 따로 검색한다(항목별 후보). 상황 설명에 검색이 끌려가지 않고,
+  // 모든 항목이 자기 근거를 찾을 수 있다. 못 뽑으면 안내문 전체로 한 번 검색한다. 앞뒤 청크는 계획 단계에서 보여 주지 않는다(A 기준 입력).
+  const reqs = a.fast ? [] : extractReqs(a.assignment);
+  const embedAll = async (texts: string[]) => {
+    try {
+      return (await embedMany(texts, 'RETRIEVAL_QUERY')).map(toVector);
+    } catch (e) {
+      if (e instanceof EmbedError) throw new PlanError(e.code === 'embed_failed' ? 502 : 429, e.code, e.message);
+      throw e;
+    }
+  };
+  const search = async (vec: string, k: number) => {
+    const { data, error } = await db.rpc('match_chunks', { p_source: a.sourceId, p_query: vec, p_k: k });
+    if (error || !data?.length) throw new PlanError(500, 'retrieval_failed', error?.message);
+    return (data as Row[]).slice().sort((x, y) => x.idx - y.idx).map(toChunk);
+  };
 
-  let plan: PlanData;
-  try {
-    const data = await askJson(buildPlanPrompt({ assignment: a.assignment, candidates, fast: a.fast, basis: a.basis }));
-    plan = cleanPlan(data, candidates, { maxMissions: a.fast ? 2 : undefined });
-  } catch (e) {
-    const code = e instanceof LlmError ? e.code : 'invalid_plan';
-    throw new PlanError(code === 'rate_limited' ? 429 : 502, code, (e as Error).message);
+  let candidates: Chunk[];
+  let groups: Chunk[][] | undefined;
+  let allowed: Record<number, Set<string>> | undefined;
+  if (reqs.length >= 2) {
+    const vecs = await embedAll(reqs); // 한 번의 배치 호출
+    groups = await Promise.all(vecs.map((v) => search(v, CONFIG.perReqK)));
+    allowed = Object.fromEntries(groups.map((g, i) => [i + 1, new Set(g.map((c) => c.id))]));
+    const seen = new Map<string, Chunk>();
+    groups.flat().forEach((c) => seen.set(c.id, c));
+    candidates = [...seen.values()];
+  } else {
+    candidates = await search((await embedAll([a.assignment]))[0], TOP_K);
+  }
+
+  // 요구 항목이 정해져 있으면 모든 항목에 미션이 있어야 한다. 빠진 항목이 있으면 그 항목을 알려 한 번 더 만든다.
+  let plan: PlanData | undefined;
+  let note: string | undefined;
+  let lastErr: unknown;
+  const hasReqs = reqs.length >= 2;
+  for (let attempt = 0; attempt < (hasReqs ? 2 : 1); attempt++) {
+    try {
+      const data = await askJson(buildPlanPrompt({ assignment: a.assignment, candidates, fast: a.fast, basis: a.basis, reqs: hasReqs ? reqs : undefined, groups, retryNote: note }));
+      const tried = cleanPlan(data, candidates, { maxMissions: a.fast ? 2 : undefined, reqs: hasReqs ? reqs : undefined, allowed });
+      if (!plan || (tried.uncovered?.length ?? 0) < (plan.uncovered?.length ?? 99)) plan = tried;
+      if (!plan.uncovered?.length) break;
+      note = `이전 시도에서 요구 ${plan.uncovered.join(', ')}에 미션이 없었습니다. 그 요구 항목마다 미션을 하나 이상, 해당 요구의 후보에서 고르세요.`;
+    } catch (e) {
+      lastErr = e;
+      if (e instanceof LlmError && e.code === 'rate_limited') break; // 한도에 걸렸으면 바로 다시 보내지 않는다
+      note = '이전 시도의 미션이 형식이나 후보 범위에 맞지 않았습니다. picks는 해당 요구 항목의 후보에서, req 번호와 함께 고르세요.';
+    }
+  }
+  if (!plan) {
+    const code = lastErr instanceof LlmError ? lastErr.code : 'invalid_plan';
+    throw new PlanError(code === 'rate_limited' ? 429 : 502, code, (lastErr as Error)?.message ?? '읽기 계획을 만들지 못했습니다');
   }
 
   if (!a.fixed) return { id: null, plan };
@@ -214,6 +243,7 @@ Deno.serve(async (req) => {
     session_id: session.id,
     reqs: plan.reqs,
     est_mins: estMins,
+    uncovered_reqs: plan.uncovered ?? [], // 미션이 없는 요구 항목(1부터). 비어 있어야 정상이다
     below_min_mins: !fast && estMins < CONFIG.minMins,
     flow,
     // 첫 미션의 안내 수준·깊이·질문 유형. 이후 미션은 submit-answer가 미션이 끝날 때마다 next_support로 돌려준다.

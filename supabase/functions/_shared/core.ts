@@ -27,7 +27,8 @@ export const CONFIG = {
   minMins: 30, // 세션 소요 시간 하한(분). plan-session이 추정치를 응답에 담아 미달 여부를 알린다
   recallMins: 5, // 모든 미션 뒤 인출·예측·연결에 드는 시간 추정(분)
   perReqMax: 3, // 요구 항목 하나에 붙일 수 있는 미션 상한(항목이 2개여도 6개를 채울 수 있게). 같은 항목의 미션은 서로 다른 핵심 청크여야 한다
-  topK: 24, // 과제 안내문과 가까운 후보 청크 수 (미션이 늘어난 만큼 후보도 늘린다)
+  topK: 24, // 과제 안내문 전체와 가까운 후보 청크 수(요구 항목을 뽑지 못했을 때의 대체 경로)
+  perReqK: 8, // 요구 항목마다 가까운 후보 청크 수(요구 항목을 뽑았을 때)
   coreSent: 3, // 조건 A: 미션당 핵심 청크 안 최대 문장 수
   ctxBefore: 1, // 조건 B: 핵심 청크 앞에 붙이는 청크 수
   ctxAfter: 1, // 조건 B: 핵심 청크 뒤에 붙이는 청크 수
@@ -182,23 +183,59 @@ export function isCopy(answer: string, excerpt: string): boolean {
 export type Variant = { qtype: QType; q: string; keys: string[]; cue: string; frame: string };
 // 질문 세트의 미션. 조건과 무관하게 A 기준(핵심 청크 하나 안의 1~3문장)으로만 만든다.
 export type Mission = { req: number; pick: Pick; vars: Variant[] };
-export type PlanData = { reqs: string[]; missions: Mission[] };
+export type PlanData = { reqs: string[]; missions: Mission[]; uncovered?: number[] };
+
+// 과제 안내문에서 번호가 붙은 요구 항목(1. 2. 3. / 1) 2) 3) / ① ② ③)을 그대로 뽑는다. 2개 이상이어야 쓰고 최대 4개.
+// "요구 항목"이라는 머리말이 있으면 그 뒤만 본다(상황 설명 속 숫자와 섞이지 않게). 못 뽑으면 빈 배열이고, 그때는 LLM이 요구 항목을 나눈다.
+export function extractReqs(assignment: string): string[] {
+  let t = assignment.replace(/\r/g, '');
+  const head = [...t.matchAll(/요구\s*항목\s*\]?\s*[:：]?/g)].pop();
+  if (head?.index != null) t = t.slice(head.index + head[0].length);
+  const circled = '①②③④⑤⑥⑦⑧⑨⑩';
+  const marks: { at: number; end: number }[] = [];
+  const re = /(?:^|\n|\s)(?:([1-9])[.)]|([①-⑩])|\(([1-9])\))\s*/g;
+  let want = 1;
+  for (const m of t.matchAll(re)) {
+    const n = m[1] ? +m[1] : m[2] ? circled.indexOf(m[2]) + 1 : +m[3];
+    if (n !== want) continue; // 1, 2, 3... 순서로 이어지는 번호만 요구 항목으로 본다
+    marks.push({ at: m.index!, end: m.index! + m[0].length });
+    want++;
+  }
+  if (marks.length < 2) return [];
+  const items = marks
+    .map((mk, i) => t.slice(mk.end, i + 1 < marks.length ? marks[i + 1].at : undefined))
+    .map((x) => x.split(/\n\s*\n|\n\s*\[[^\]\n]{1,20}\]/)[0]) // 빈 줄이나 다음 머리말([유의] 등)에서 항목을 끝낸다
+    .map((x) => x.replace(/\s+/g, ' ').trim())
+    .filter((x) => x.length >= 8);
+  return items.length >= 2 ? items.slice(0, 4) : [];
+}
 
 // LLM이 만든 읽기 계획을 A 기준으로 검증한다. 조건 B는 이 계획에 앞뒤 청크만 더한다(contextIds).
 // 미션마다 핵심 발췌는 한 청크 안의 1~CONFIG.coreSent문장이다. 첫 번째로 유효한 pick만 쓴다.
-export function cleanPlan(data: any, candidates: Chunk[], opts: { maxMissions?: number } = {}): PlanData {
+// opts.reqs: 안내문에서 뽑은 요구 항목. 주어지면 LLM이 나눈 항목 대신 이것을 쓰고, 미션의 req가 범위 밖이면 버린다(1번으로 몰지 않는다).
+// opts.allowed: 요구 항목(1부터)별로 고를 수 있는 청크 ID. 주어지면 미션의 핵심 청크가 자기 요구 항목의 후보에 있어야 한다.
+export function cleanPlan(
+  data: any,
+  candidates: Chunk[],
+  opts: { maxMissions?: number; reqs?: string[]; allowed?: Record<number, Set<string>> } = {},
+): PlanData {
   const byId: Record<string, Chunk> = {};
   candidates.forEach((c) => (byId[c.id] = c));
-  const reqs: string[] = (data?.reqs ?? []).map(String).filter(Boolean).slice(0, 4);
+  const fixedReqs = !!opts.reqs?.length;
+  const reqs: string[] = fixedReqs ? opts.reqs!.slice(0, 4) : (data?.reqs ?? []).map(String).filter(Boolean).slice(0, 4);
   if (!reqs.length) throw new Error('no reqs');
 
   const missions: Mission[] = [];
 
   (data?.missions ?? []).forEach((m: any) => {
+    const rq = Math.round(+m.req);
+    if (fixedReqs && !(rq >= 1 && rq <= reqs.length)) return; // 요구 항목이 정해져 있으면 항목 번호가 없는 미션은 버린다
+    const reqNo = Math.min(reqs.length, Math.max(1, rq || 1));
     let pick: Pick | null = null;
     for (const p of m.picks ?? []) {
       const c = byId[p?.chunk_id];
       if (!c) continue;
+      if (opts.allowed?.[reqNo] && !opts.allowed[reqNo].has(c.id)) continue;
       const a = Math.round(+p.from);
       let b = Math.round(+p.to);
       if (!(a >= 1 && b >= a && b <= c.s.length)) continue;
@@ -226,7 +263,7 @@ export function cleanPlan(data: any, candidates: Chunk[], opts: { maxMissions?: 
     if (!pick || !vars.length) return;
 
     missions.push({
-      req: Math.min(reqs.length, Math.max(1, Math.round(+m.req) || 1)),
+      req: reqNo,
       pick,
       vars,
     });
@@ -250,7 +287,9 @@ export function cleanPlan(data: any, candidates: Chunk[], opts: { maxMissions?: 
     .slice(0, opts.maxMissions ?? CONFIG.maxMissions);
 
   if (!kept.length) throw new Error('no valid mission');
-  return { reqs, missions: kept };
+  // 미션이 하나도 없는 요구 항목(1부터). 호출한 쪽이 한 번 더 시도하거나 기록한다.
+  const uncovered = reqs.map((_, i) => i + 1).filter((n) => !kept.some((m) => m.req === n));
+  return { reqs, missions: kept, ...(uncovered.length ? { uncovered } : {}) };
 }
 
 /* ---------- 조건 B: 계획에 앞뒤 청크만 더한다 ---------- */
