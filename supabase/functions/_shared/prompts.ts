@@ -26,7 +26,7 @@ export function buildPlanPrompt(opts: { assignment: string; candidates: Chunk[];
     '- reqs: 과제 안내문을 2~4개의 요구 항목으로 나눕니다(자료 요약이 아니라 과제 요구의 정리).\n' +
     (fast
       ? `- missions: ${nMissions}개. 각 미션은 요구 항목 하나(req 번호)와 연결합니다. `
-      : `- missions: 기본 ${nMissions}개(최대 ${maxMissions}개). 요구 항목마다 미션을 최소 1개 만들고, 중요한 항목에는 최대 ${CONFIG.perReqMax}개까지 만듭니다. ` +
+      : `- missions: ${nMissions}개(최대 ${maxMissions}개). 한 세션은 최소 ${CONFIG.minMins}분이 되도록 미션을 ${nMissions}개 채웁니다. 요구 항목마다 미션을 최소 1개 만들고, 항목이 적으면 중요한 항목에 항목당 최대 ${CONFIG.perReqMax}개까지 만듭니다. ` +
         '한 항목에 미션이 둘이면 서로 다른 청크이고 서로 다른 내용을 읽게 해야 합니다(같은 내용을 반복해서 묻지 않습니다). 각 미션은 요구 항목 하나(req 번호)와 연결합니다. ') +
     '초록·요약·결론처럼 이미 요약된 청크는 미션 대상으로 고르지 말고 주장·근거·데이터가 실제로 있는 본문 청크를 고릅니다.\n' +
     '- picks: 미션마다 정확히 1개, 위 자료에 있는 chunk_id 하나와 그 청크 안의 문장 번호(from~to)만 사용합니다. ' +

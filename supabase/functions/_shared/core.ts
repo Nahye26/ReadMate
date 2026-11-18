@@ -22,9 +22,11 @@ export const READING_TYPE: Record<Condition, string> = { A: '발췌형', B: '맥
 //   A = 핵심 청크 안 1~coreSent문장
 //   B = 핵심 청크 + 앞 ctxBefore개 + 뒤 ctxAfter개 (최대 MAX_TEXT_UNITS개 청크)
 export const CONFIG = {
-  missions: 4, // 요구 항목(2~4개)마다 미션 최소 1개를 두므로 기본은 4개 안팎이다 (2026-11-18, 읽기 과정이 3개로는 부족하다는 판단)
+  missions: 6, // 한 세션은 최소 30분(minMins)이 되도록 구성한다. 미션당 약 5분(조건 B) × 6 + 인출·연결 (2026-11-18)
   maxMissions: 6, // 전체 상한. 소요 시간(미션당 약 5분)과 LLM 호출(미션당 약 2~2.5회)이 함께 늘어난다
-  perReqMax: 2, // 요구 항목 하나에 붙일 수 있는 미션 상한. 같은 항목의 미션은 서로 다른 핵심 청크여야 한다
+  minMins: 30, // 세션 소요 시간 하한(분). plan-session이 추정치를 응답에 담아 미달 여부를 알린다
+  recallMins: 5, // 모든 미션 뒤 인출·예측·연결에 드는 시간 추정(분)
+  perReqMax: 3, // 요구 항목 하나에 붙일 수 있는 미션 상한(항목이 2개여도 6개를 채울 수 있게). 같은 항목의 미션은 서로 다른 핵심 청크여야 한다
   topK: 24, // 과제 안내문과 가까운 후보 청크 수 (미션이 늘어난 만큼 후보도 늘린다)
   coreSent: 3, // 조건 A: 미션당 핵심 청크 안 최대 문장 수
   ctxBefore: 1, // 조건 B: 핵심 청크 앞에 붙이는 청크 수

@@ -201,9 +201,13 @@ Deno.serve(async (req) => {
     return json({ error: 'db_error', message: (m1.error ?? m2?.error)?.message }, 500);
   }
 
+  // 세션 소요 시간 추정(분): 미션별 읽기·답변 + 인출·연결. 하한(CONFIG.minMins)에 못 미치면 화면이 알 수 있게 표시한다(fast 제외).
+  const estMins = shown.reduce((n, x) => n + x.mins, 0) + CONFIG.recallMins;
   return json({
     session_id: session.id,
     reqs: plan.reqs,
+    est_mins: estMins,
+    below_min_mins: !fast && estMins < CONFIG.minMins,
     flow,
     // 첫 미션의 안내 수준·깊이·질문 유형. 이후 미션은 submit-answer가 미션이 끝날 때마다 next_support로 돌려준다.
     start_support: {
