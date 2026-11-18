@@ -39,8 +39,23 @@ export const MAX_TEXT_UNITS = 1 + CONFIG.ctxBefore + CONFIG.ctxAfter; // 미션�
 
 /* ---------- 청킹 ---------- */
 
+// 문장 끝(. ! ? 。) 뒤 공백에서 자른다. 단, "III." "1." "2)"처럼 제목 번호로 끝나는 짧은 조각(40자 이하)은 문장이 아니므로
+// 뒤 조각과 합친다("III. 연구 방법 1. 사례 선정 근거 본 연구에서는 …"가 한 문장이 된다).
+const HEADING_NUM = /(?:^|\s)(?:[IVXivx]{1,5}|\d{1,2})\.$/;
 export function splitSentences(t: string): string[] {
-  return t.split(/(?<=[.!?。])\s+/).filter(Boolean);
+  const parts = t.split(/(?<=[.!?。])\s+/).filter(Boolean);
+  const out: string[] = [];
+  let carry = '';
+  for (const p of parts) {
+    const cur = carry ? carry + ' ' + p : p;
+    if (cur.length <= 40 && HEADING_NUM.test(cur)) carry = cur;
+    else {
+      out.push(cur);
+      carry = '';
+    }
+  }
+  if (carry) out.push(carry);
+  return out;
 }
 
 // 청크 크기 (2026-11-18): 한국어 학술문은 3문장·300자 단위로 자르면 청크가 평균 160자로 너무 짧아(조건 B 발췌 약 490자) 읽기가 부족했다.
