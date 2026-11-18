@@ -208,6 +208,29 @@ test('계획 검증: 요구 항목이 정해지면 항목 번호 없는 미션�
   assert.strictEqual(cleanPlan({ reqs: ['a b c d e f g h'], missions: [mk(undefined, 'p1')] }, chunks).missions[0].req, 1);
 });
 
+test('계획 검증: 뒤쪽 요구 항목의 미션이 앞 항목에 밀려 잘리지 않는다(모든 항목을 먼저 덮는다)', () => {
+  const ids = Array.from({ length: 12 }, (_, i) => 'p' + (i + 1));
+  const chunks = ids.map((id) => ({ id, sec: 's', s: ['a.', 'b.'], t: 'a. b.' }));
+  const mk = (req: number, id: string) => ({
+    req, picks: [{ chunk_id: id, from: 1, to: 2 }],
+    variants: [{ qtype: 'literal', question: 'q', key_points: ['k'], cue: 'c', frame: 'f ____' }],
+  });
+  const reqs = ['요구 하나입니다 하나', '요구 둘입니다 둘', '요구 셋입니다 셋', '요구 넷입니다 넷'];
+  // LLM이 앞 두 항목에만 미션을 많이 만든 경우: 항목 1·2에 3개씩, 항목 3·4에 1개씩(총 8개) → 상한 6개에서 3·4가 잘리면 안 된다.
+  const data = { missions: [mk(1, 'p1'), mk(1, 'p2'), mk(1, 'p3'), mk(2, 'p4'), mk(2, 'p5'), mk(2, 'p6'), mk(3, 'p7'), mk(4, 'p8')] };
+  const p = cleanPlan(data, chunks, { reqs });
+  assert.strictEqual(p.missions.length, CONFIG.maxMissions);
+  assert.deepStrictEqual([...new Set(p.missions.map((m) => m.req))], [1, 2, 3, 4]); // 네 항목 모두 덮임
+  assert.strictEqual('uncovered' in p, false);
+  const r = p.missions.map((m) => m.req);
+  assert.deepStrictEqual(r, [...r].sort((x, y) => x - y)); // 출력은 항목 순서
+  // 같은 청크를 다른 항목이 이미 썼어도, 그 항목을 덮을 다른 미션이 없으면 다시 쓴다(항목을 비우지 않는다).
+  const dup = cleanPlan({ missions: [mk(1, 'p1'), mk(2, 'p1')] }, chunks, { reqs: reqs.slice(0, 2) });
+  assert.deepStrictEqual(dup.missions.map((m) => m.req), [1, 2]);
+  // 항목 수가 상한보다 많을 때(fast, 2개)는 앞 항목부터 덮는다.
+  assert.deepStrictEqual(cleanPlan(data, chunks, { reqs, maxMissions: 2 }).missions.map((m) => m.req), [1, 2]);
+});
+
 // 한 절 'a'(idx 0~3)와 다음 절 'b'(idx 4~5)
 const pool = [
   { id: 'a1', idx: 0, sec: 'a' }, { id: 'a2', idx: 1, sec: 'a' }, { id: 'a3', idx: 2, sec: 'a' }, { id: 'a4', idx: 3, sec: 'a' },
