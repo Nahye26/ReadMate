@@ -3,6 +3,7 @@
 // 서버가 상태의 기준이다(진행 순서, 힌트·보완 횟수, 다음 안내 수준). 이 파일은 화면과 호출만 맡는다.
 // 새로고침하면 화면 상태는 사라진다(서버에 세션을 다시 불러오는 함수는 아직 없다).
 import { SUPABASE_URL, SUPABASE_ANON_KEY, CONDITION } from './config.js';
+import { cleanPages } from './pdfclean.mjs';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
 const $ = (s, r = document) => r.querySelector(s);
@@ -154,13 +155,15 @@ async function readPdf(file) {
   const lib = await loadPdfJs();
   const pdf = await lib.getDocument({ data: await file.arrayBuffer() }).promise;
   if (pdf.numPages > MAX_PAGES) throw { code: 'toolong' };
-  const sections = [];
+  // 쪽마다 글자 조각의 위치(x, y)와 쪽 높이를 함께 모아 머리말·꼬리말·쪽번호를 걷어 낸다(pdfclean.mjs).
+  const raw = [];
   for (let p = 1; p <= pdf.numPages; p++) {
-    const tc = await (await pdf.getPage(p)).getTextContent();
-    let t = '';
-    tc.items.forEach((it) => { t += it.str; if (it.hasEOL) t += ' '; });
-    if (t.trim().length > 20) sections.push({ sec: `${p}쪽`, text: t });
+    const page = await pdf.getPage(p);
+    const tc = await page.getTextContent();
+    raw.push({ h: page.view[3] - page.view[1], items: tc.items.map((it) => ({ s: it.str, x: it.transform[4], y: it.transform[5], eol: !!it.hasEOL })) });
   }
+  const sections = [];
+  cleanPages(raw).forEach((t, i) => { if (t.trim().length > 20) sections.push({ sec: `${i + 1}쪽`, text: t }); });
   const all = sections.map((s) => s.text).join('');
   const ko = (all.match(/[가-힣]/g) || []).length / Math.max(1, all.length);
   return { sections, pages: pdf.numPages, lang: ko > 0.2 ? 'ko' : 'en' };

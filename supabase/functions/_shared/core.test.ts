@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert';
 import { createRequire } from 'node:module';
 import {
-  buildChunks, buildChunksFromSections, CHUNK_CONFIG, resolvePick, validateQuote, isCopy, cleanPlan, extractReqs, nextSupport, calibrate,
+  splitSentences, buildChunks, buildChunksFromSections, CHUNK_CONFIG, resolvePick, validateQuote, isCopy, cleanPlan, extractReqs, nextSupport, calibrate,
   summarize, EXPERIMENT_FLOW, DEFAULT_FLOW, contextIds, resolveExcerpts, estimateMins, normalizeAssignment,
   CONFIG, MAX_TEXT_UNITS, MAX_HINT, missionState, currentMission, answerOutcome, leaksKey, sentenceNums, pickQtype, supportBefore,
 } from './core.ts';
@@ -38,6 +38,18 @@ test('청킹: 문장 수·글자 수 상한에서 끊고, 짧은 꼬리는 앞 �
   // 합쳐서 hardMaxChars를 넘기면 합치지 않는다.
   const d = buildChunks(sent(6, 125) + ' ' + sent(1, 100, '꼬리'), 's', 'd-');
   assert.ok(d.length >= 2);
+});
+
+test('문장 분리: 제목 번호(III. 1.)로 끝나는 짧은 조각은 뒤 문장과 합친다', () => {
+  const r = splitSentences('III. 연구 방법 1. 사례 선정 근거 본 연구에서는 사례를 선정하였다. 둘째 문장이다.');
+  assert.deepStrictEqual(r, ['III. 연구 방법 1. 사례 선정 근거 본 연구에서는 사례를 선정하였다.', '둘째 문장이다.']);
+  // 보통 문장은 그대로 자른다
+  assert.deepStrictEqual(splitSentences('첫 문장이다. 둘째 문장이다.'), ['첫 문장이다.', '둘째 문장이다.']);
+  // 숫자로 끝나도 긴 문장은 합치지 않는다
+  const long = '이 문장은 충분히 길어서 제목 번호가 아니라 일반 문장이며 마지막이 숫자 6.';
+  assert.strictEqual(splitSentences(long + ' 다음 문장이다.').length, 2);
+  // 맨 끝의 제목 번호 조각도 잃지 않는다
+  assert.deepStrictEqual(splitSentences('본문이다. IV.'), ['본문이다.', 'IV.']);
 });
 
 test('청킹: 쪽번호·구분선 같은 조각은 버린다', () => {
