@@ -1,5 +1,6 @@
 // LLM 호출 (Gemini). 키는 Supabase 비밀값(secrets)에서만 읽는다. 브라우저로 내려보내지 않는다.
 //   supabase secrets set GEMINI_API_KEY=... GEMINI_MODEL=...
+//   단계별 모델(선택): GEMINI_MODEL_PLAN(읽기 계획), GEMINI_MODEL_JUDGE(판정·힌트·보완). 없으면 GEMINI_MODEL을 쓴다. 인출·연결 등은 GEMINI_MODEL.
 // 호출 방식은 index.html 데모의 gemCall을 서버로 옮긴 것이다. 모델 이름은 코드에 고정하지 않는다.
 
 export class LlmError extends Error {
@@ -53,9 +54,17 @@ async function once(prompt: string, key: string, model: string, timeoutMs: numbe
   }
 }
 
-export async function askJson(prompt: string, timeoutMs = ATTEMPT_MS) {
+export type LlmRole = 'plan' | 'judge' | 'light';
+
+// 단계별 모델: 역할에 맞는 비밀값이 있으면 그것을, 없으면 GEMINI_MODEL을 쓴다.
+export function modelFor(role: LlmRole = 'light'): string | undefined {
+  const byRole = role === 'plan' ? Deno.env.get('GEMINI_MODEL_PLAN') : role === 'judge' ? Deno.env.get('GEMINI_MODEL_JUDGE') : undefined;
+  return byRole?.trim() || Deno.env.get('GEMINI_MODEL') || undefined;
+}
+
+export async function askJson(prompt: string, timeoutMs = ATTEMPT_MS, role: LlmRole = 'light') {
   const key = Deno.env.get('GEMINI_API_KEY');
-  const model = Deno.env.get('GEMINI_MODEL');
+  const model = modelFor(role);
   if (!key || !model) throw new LlmError('not_configured', 'GEMINI_API_KEY / GEMINI_MODEL 비밀값이 필요합니다');
   // 주 모델이 계속 막히면(503/429/시간 초과) 예비 모델로 넘어간다. 예비 모델은 GEMINI_FALLBACK_MODELS(쉼표로 구분)로 바꿀 수 있다.
   const fallbacks = (Deno.env.get('GEMINI_FALLBACK_MODELS') ?? 'gemini-3.5-flash-lite,gemini-3.1-flash-lite').split(',').map((m) => m.trim()).filter(Boolean);
