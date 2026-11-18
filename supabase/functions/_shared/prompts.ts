@@ -12,8 +12,17 @@ export const RULES =
 export const chunkText = (list: Chunk[]) =>
   list.map((c) => `[${c.id}] ` + c.s.map((s, i) => `(${i + 1}) ${s}`).join(' ')).join('\n');
 
-export function buildPlanPrompt(opts: { assignment: string; candidates: Chunk[]; fast?: boolean; basis?: Basis }) {
+// reqs/groups: 안내문에서 뽑은 요구 항목과 항목별 후보(검색 결과). 주어지면 후보를 항목별로 묶어 보여 주고, 미션은 자기 항목의 후보에서만 고르게 한다.
+// retryNote: 첫 시도에서 미션이 없었던 항목을 알려 다시 만들게 할 때 쓴다.
+export function buildPlanPrompt(opts: {
+  assignment: string; candidates: Chunk[]; fast?: boolean; basis?: Basis;
+  reqs?: string[]; groups?: Chunk[][]; retryNote?: string;
+}) {
   const { assignment, candidates, fast } = opts;
+  const fixed = !!opts.reqs?.length && !!opts.groups?.length;
+  const material = fixed
+    ? opts.reqs!.map((r, i) => `[요구 ${i + 1}의 후보] ${r}\n${chunkText(opts.groups![i] ?? [])}`).join('\n\n')
+    : chunkText(candidates);
   const chunkBasis = opts.basis === 'chunk';
   const nMissions = fast ? 2 : CONFIG.missions;
   const maxMissions = fast ? 2 : CONFIG.maxMissions;
@@ -21,9 +30,13 @@ export function buildPlanPrompt(opts: { assignment: string; candidates: Chunk[];
     RULES +
     '다음 과제와 읽기 자료를 보고 읽기 지도를 JSON으로 만드세요.\n\n' +
     `[과제 안내문]\n${assignment}\n\n` +
-    `[읽기 자료] 한 줄이 한 청크이며 [청크ID] (문장번호) 문장 형식입니다.\n${chunkText(candidates)}\n\n` +
+    `[읽기 자료] 한 줄이 한 청크이며 [청크ID] (문장번호) 문장 형식입니다.\n${material}\n\n` +
     '규칙:\n' +
-    '- reqs: 과제 안내문을 2~4개의 요구 항목으로 나눕니다(자료 요약이 아니라 과제 요구의 정리).\n' +
+    (fixed
+      ? `- reqs: 요구 항목은 안내문의 번호 항목 ${opts.reqs!.length}개로 이미 정해졌습니다. 그대로 reqs에 적고 고치거나 합치지 않습니다. ` +
+        '읽기 자료는 요구 항목별 후보로 묶여 있습니다. 각 미션의 picks는 반드시 그 미션의 req 번호에 해당하는 "요구 N의 후보"에서 고릅니다. 모든 요구 항목에 미션이 하나 이상 있어야 합니다.\n'
+      : '- reqs: 과제 안내문을 2~4개의 요구 항목으로 나눕니다(자료 요약이 아니라 과제 요구의 정리).\n') +
+    (opts.retryNote ? `- 주의: ${opts.retryNote}\n` : '') +
     (fast
       ? `- missions: ${nMissions}개. 각 미션은 요구 항목 하나(req 번호)와 연결합니다. `
       : `- missions: ${nMissions}개(최대 ${maxMissions}개). 한 세션은 최소 ${CONFIG.minMins}분이 되도록 미션을 ${nMissions}개 채웁니다. 요구 항목마다 미션을 최소 1개 만들고, 항목이 적으면 중요한 항목에 항목당 최대 ${CONFIG.perReqMax}개까지 만듭니다. ` +

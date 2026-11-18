@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert';
 import { createRequire } from 'node:module';
 import {
-  buildChunks, resolvePick, validateQuote, isCopy, cleanPlan, nextSupport, calibrate,
+  buildChunks, resolvePick, validateQuote, isCopy, cleanPlan, extractReqs, nextSupport, calibrate,
   summarize, EXPERIMENT_FLOW, DEFAULT_FLOW, contextIds, resolveExcerpts, estimateMins, normalizeAssignment,
   CONFIG, MAX_TEXT_UNITS, MAX_HINT, missionState, currentMission, answerOutcome, leaksKey, sentenceNums, pickQtype, supportBefore,
 } from './core.ts';
@@ -100,6 +100,50 @@ test('세션 구성: 기본 미션 수와 시간 추정이 최소 30분을 채�
   const perMission = estimateMins(MAX_TEXT_UNITS * 300);
   assert.ok(CONFIG.missions * perMission + CONFIG.recallMins >= CONFIG.minMins);
   assert.ok(CONFIG.missions <= CONFIG.maxMissions);
+});
+
+test('요구 항목 추출: 번호 항목을 그대로 뽑고, 상황 설명 속 숫자는 무시한다', () => {
+  const asg = `[상황] 당신은 2014년 사업을 검토하는 담당자입니다. 1500자 내외로 쓰세요.
+[요구 항목]
+1. 사례가 우수 운영 사례로 선정된 이유와 연구 방법을 설명하세요.
+2. 교사의 역할과 지역사회 협업 체계를 정리하세요.
+3. 학생에게 가져온 변화를 근거와 함께 설명하세요.
+4. 적용할 때의 시사점과 연구의 한계를 쓰세요.
+[유의] 평소처럼 AI를 써도 됩니다.`;
+  const r = extractReqs(asg);
+  assert.strictEqual(r.length, 4);
+  assert.ok(r[0].startsWith('사례가 우수 운영 사례로'));
+  assert.strictEqual(r[3], '적용할 때의 시사점과 연구의 한계를 쓰세요.'); // [유의] 머리말 이하는 마지막 항목에 붙지 않는다
+  // 한 줄에 이어 붙인 번호, 괄호·원문자 번호도 읽는다
+  assert.strictEqual(extractReqs('요구 항목: 1) 원인을 설명하세요. 2) 한계를 설명하세요.').length, 2);
+  assert.strictEqual(extractReqs('① 배경을 정리하세요 ② 결과를 정리하세요 ③ 시사점을 정리하세요').length, 3);
+  // 번호가 1부터 이어지지 않거나 항목이 하나뿐이면 못 뽑은 것으로 본다(LLM이 나눈다)
+  assert.deepStrictEqual(extractReqs('이 논문을 읽고 3. 부분을 요약하세요.'), []);
+  assert.deepStrictEqual(extractReqs('1. 논문의 핵심을 설명하세요.'), []);
+  assert.deepStrictEqual(extractReqs('추천 시스템의 인기 편향 원인과 한계를 정리하세요.'), []);
+  // 5개 이상이면 앞의 4개
+  assert.strictEqual(extractReqs('1. 첫째 항목입니다 2. 둘째 항목입니다 3. 셋째 항목입니다 4. 넷째 항목입니다 5. 다섯째 항목입니다').length, 4);
+});
+
+test('계획 검증: 요구 항목이 정해지면 항목 번호 없는 미션은 버리고, 후보 밖 청크는 거르고, 빠진 항목을 알린다', () => {
+  const ids = ['p1', 'p2', 'p3', 'p4', 'p5'];
+  const chunks = ids.map((id) => ({ id, sec: 's', s: ['a.', 'b.'], t: 'a. b.' }));
+  const mk = (req: number | undefined, id: string) => ({
+    req, picks: [{ chunk_id: id, from: 1, to: 2 }],
+    variants: [{ qtype: 'literal', question: 'q', key_points: ['k'], cue: 'c', frame: 'f ____' }],
+  });
+  const reqs = ['요구 하나입니다 하나', '요구 둘입니다 둘', '요구 셋입니다 셋'];
+  const allowed = { 1: new Set(['p1', 'p2']), 2: new Set(['p3', 'p4']), 3: new Set(['p5']) };
+  const data = { reqs: ['LLM이 바꾼 항목'], missions: [mk(1, 'p1'), mk(undefined, 'p2'), mk(2, 'p1'), mk(2, 'p3')] };
+  const p = cleanPlan(data, chunks, { reqs, allowed });
+  assert.deepStrictEqual(p.reqs, reqs); // LLM이 나눈 항목이 아니라 정해진 항목을 쓴다
+  assert.deepStrictEqual(p.missions.map((m) => [m.req, m.pick[0]]), [[1, 'p1'], [2, 'p3']]); // 번호 없음·후보 밖(p1은 요구 2의 후보가 아님)은 버려진다
+  assert.deepStrictEqual(p.uncovered, [3]); // 요구 3에는 미션이 없다
+  // 모두 덮이면 uncovered가 없다
+  const ok = cleanPlan({ missions: [mk(1, 'p1'), mk(2, 'p3'), mk(3, 'p5')] }, chunks, { reqs, allowed });
+  assert.strictEqual('uncovered' in ok, false);
+  // 요구 항목을 주지 않은 대체 경로는 이전처럼 동작한다(번호가 없으면 1번)
+  assert.strictEqual(cleanPlan({ reqs: ['a b c d e f g h'], missions: [mk(undefined, 'p1')] }, chunks).missions[0].req, 1);
 });
 
 // 한 절 'a'(idx 0~3)와 다음 절 'b'(idx 4~5)
