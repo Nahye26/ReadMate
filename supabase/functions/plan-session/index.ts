@@ -16,7 +16,7 @@ import { authedUser, corsHeaders, json, serviceClient } from '../_shared/http.ts
 import { askJson, LlmError } from '../_shared/llm.ts';
 import { buildPlanPrompt } from '../_shared/prompts.ts';
 
-const TOP_K = 16;
+const TOP_K = CONFIG.topK;
 const PROMPT_VERSION = 'v0.5-chat'; // 로그 스키마 버전 (eval/ 과 동일)
 
 type Db = ReturnType<typeof serviceClient>;

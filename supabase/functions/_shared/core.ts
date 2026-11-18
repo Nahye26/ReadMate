@@ -22,8 +22,10 @@ export const READING_TYPE: Record<Condition, string> = { A: '발췌형', B: '맥
 //   A = 핵심 청크 안 1~coreSent문장
 //   B = 핵심 청크 + 앞 ctxBefore개 + 뒤 ctxAfter개 (최대 MAX_TEXT_UNITS개 청크)
 export const CONFIG = {
-  missions: 3,
-  maxMissions: 4,
+  missions: 4, // 요구 항목(2~4개)마다 미션 최소 1개를 두므로 기본은 4개 안팎이다 (2026-11-18, 읽기 과정이 3개로는 부족하다는 판단)
+  maxMissions: 6, // 전체 상한. 소요 시간(미션당 약 5분)과 LLM 호출(미션당 약 2~2.5회)이 함께 늘어난다
+  perReqMax: 2, // 요구 항목 하나에 붙일 수 있는 미션 상한. 같은 항목의 미션은 서로 다른 핵심 청크여야 한다
+  topK: 24, // 과제 안내문과 가까운 후보 청크 수 (미션이 늘어난 만큼 후보도 늘린다)
   coreSent: 3, // 조건 A: 미션당 핵심 청크 안 최대 문장 수
   ctxBefore: 1, // 조건 B: 핵심 청크 앞에 붙이는 청크 수
   ctxAfter: 1, // 조건 B: 핵심 청크 뒤에 붙이는 청크 수
@@ -112,7 +114,7 @@ export function cleanPlan(data: any, candidates: Chunk[], opts: { maxMissions?: 
 
   const missions: Mission[] = [];
 
-  (data?.missions ?? []).slice(0, opts.maxMissions ?? CONFIG.maxMissions).forEach((m: any) => {
+  (data?.missions ?? []).forEach((m: any) => {
     let pick: Pick | null = null;
     for (const p of m.picks ?? []) {
       const c = byId[p?.chunk_id];
@@ -150,8 +152,25 @@ export function cleanPlan(data: any, candidates: Chunk[], opts: { maxMissions?: 
     });
   });
 
-  if (!missions.length) throw new Error('no valid mission');
-  return { reqs, missions };
+  // 요구 항목당 perReqMax개, 같은 핵심 청크는 한 번만(다른 항목이어도 같은 대목을 두 번 묻지 않는다). 항목 순서로 정렬해
+  // 과제 요구를 앞에서부터 읽게 하고, 전체는 maxMissions에서 자른다. fast(미션 2개)는 항목당 상한을 두지 않는다.
+  const perReq = new Map<number, number>();
+  const usedChunk = new Set<string>();
+  const kept = missions
+    .map((m, i) => ({ m, i }))
+    .sort((a, b) => a.m.req - b.m.req || a.i - b.i)
+    .filter(({ m }) => {
+      const n = perReq.get(m.req) ?? 0;
+      if (usedChunk.has(m.pick[0]) || (!opts.maxMissions && n >= CONFIG.perReqMax)) return false;
+      perReq.set(m.req, n + 1);
+      usedChunk.add(m.pick[0]);
+      return true;
+    })
+    .map(({ m }) => m)
+    .slice(0, opts.maxMissions ?? CONFIG.maxMissions);
+
+  if (!kept.length) throw new Error('no valid mission');
+  return { reqs, missions: kept };
 }
 
 /* ---------- 조건 B: 계획에 앞뒤 청크만 더한다 ---------- */

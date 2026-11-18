@@ -75,6 +75,25 @@ test('계획 검증: 후보에 없는 청크·범위 밖 문장은 버리고, �
   assert.throws(() => cleanPlan({ reqs: [], missions: [] }, chunks), /no reqs/);
 });
 
+test('계획 검증: 요구 항목당 미션 2개까지, 같은 청크는 한 번만, 항목 순서로 정렬, 전체 상한', () => {
+  const chunks = ['p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7', 'p8'].map((id) => ({ id, sec: 's', s: ['a.', 'b.'], t: 'a. b.' }));
+  const mk = (req: number, id: string) => ({
+    req, picks: [{ chunk_id: id, from: 1, to: 2 }],
+    variants: [{ qtype: 'literal', question: 'q', key_points: ['k'], cue: 'c', frame: 'f ____' }],
+  });
+  const data = {
+    reqs: ['r1', 'r2', 'r3'],
+    // 항목 1에 3개(셋째는 버림), 항목 3이 먼저 나옴, p2를 다른 항목에서 다시 고름(버림)
+    missions: [mk(3, 'p6'), mk(1, 'p1'), mk(1, 'p2'), mk(1, 'p3'), mk(2, 'p2'), mk(2, 'p4'), mk(3, 'p7'), mk(3, 'p8')],
+  };
+  const p = cleanPlan(data, chunks);
+  assert.deepStrictEqual(p.missions.map((m) => m.req), [1, 1, 2, 3, 3]);
+  assert.deepStrictEqual(p.missions.map((m) => m.pick[0]), ['p1', 'p2', 'p4', 'p6', 'p7']);
+  assert.ok(p.missions.length <= CONFIG.maxMissions);
+  // fast(maxMissions=2)는 항목당 상한 없이 앞에서 2개만
+  assert.strictEqual(cleanPlan(data, chunks, { maxMissions: 2 }).missions.length, 2);
+});
+
 // 한 절 'a'(idx 0~3)와 다음 절 'b'(idx 4~5)
 const pool = [
   { id: 'a1', idx: 0, sec: 'a' }, { id: 'a2', idx: 1, sec: 'a' }, { id: 'a3', idx: 2, sec: 'a' }, { id: 'a4', idx: 3, sec: 'a' },
