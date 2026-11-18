@@ -7,7 +7,7 @@
 // 동작: 문단 단위로 청킹 → 청크 임베딩(Gemini API 배치 호출) → sources / chunks 저장
 // 출력: { source_id, chunks, next_idx }   (chunks: 이번 호출에서 저장한 수, next_idx: 다음 호출의 idx_start)
 // 같은 호출을 다시 보내도 안전하다(같은 청크 ID는 덮어쓴다). 클라이언트는 실패한 배치만 다시 보낸다.
-import { buildChunks, type Chunk } from '../_shared/core.ts';
+import { buildChunksFromSections, type Chunk } from '../_shared/core.ts';
 import { EmbedError, embedMany, toVector } from '../_shared/embed.ts';
 import { authedUser, corsHeaders, json, serviceClient } from '../_shared/http.ts';
 
@@ -36,12 +36,12 @@ Deno.serve(async (req) => {
   if (!create && (!Array.isArray(sections) || !sections.length)) return json({ error: 'bad_request', message: 'sections가 필요합니다' }, 400);
   if (!append && (typeof title !== 'string' || !title.trim())) return json({ error: 'bad_request', message: 'title이 필요합니다' }, 400);
 
-  const chunks: Chunk[] = [];
-  (create ? [] : sections).forEach((s: any, i: number) => {
-    const text = String(s?.text ?? '');
-    const sec = String(s?.sec ?? `본문 ${sectionOffset + i + 1}`);
-    buildChunks(text, sec, `p${sectionOffset + i + 1}-`).forEach((c) => chunks.push(c));
-  });
+  const chunks: Chunk[] = create
+    ? []
+    : buildChunksFromSections(
+        sections.map((s: any, i: number) => ({ sec: String(s?.sec ?? `본문 ${sectionOffset + i + 1}`), text: String(s?.text ?? '') })),
+        sectionOffset,
+      );
   const chars = chunks.reduce((n, c) => n + c.t.length, 0);
   if (!create && !chunks.length) return json({ error: 'empty_text' }, 400);
   if (chunks.length > MAX_CHUNKS_PER_CALL) {

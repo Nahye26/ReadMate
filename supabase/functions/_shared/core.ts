@@ -43,23 +43,101 @@ export function splitSentences(t: string): string[] {
   return t.split(/(?<=[.!?。])\s+/).filter(Boolean);
 }
 
-export function buildChunks(text: string, sec: string, prefix: string): Chunk[] {
-  const sentences = splitSentences(text.replace(/\s+/g, ' ').trim());
-  const out: Chunk[] = [];
-  let cur: string[] = [];
+// 청크 크기 (2026-11-18): 한국어 학술문은 3문장·300자 단위로 자르면 청크가 평균 160자로 너무 짧아(조건 B 발췌 약 490자) 읽기가 부족했다.
+// 문장 수와 글자 수 둘 중 먼저 닿는 쪽에서 끊되, 짧은 조각은 이웃에 합친다. 글자 수 자체에 선행연구 근거는 없고 파일럿으로 조정하는 값이다.
+export const CHUNK_CONFIG = {
+  maxSent: 7, // 한 청크의 문장 수 상한
+  targetChars: 400, // 이 글자 수에 닿으면 끊는다
+  minChars: 150, // 이보다 짧은 청크는 이웃과 합친다
+  hardMaxChars: 800, // 합친 뒤에도 넘기지 않는 상한(문장 하나가 매우 긴 경우는 예외)
+};
+
+// 쪽번호·구분선·한두 글자 조각처럼 읽을 내용이 없는 문장
+export const isNoiseSentence = (s: string) => s.trim().length < 3 || /^[\d\s.,\-–—~·|━─=*]+$/.test(s.trim());
+
+type Sent = { t: string; page?: number };
+
+function packSentences(sents: Sent[], sec: (first: Sent, last: Sent) => string, prefix: string): Chunk[] {
+  const { maxSent, targetChars, minChars, hardMaxChars } = CHUNK_CONFIG;
+  const size = (g: Sent[]) => g.reduce((n, x) => n + x.t.length, 0);
+  let groups: Sent[][] = [];
+  let cur: Sent[] = [];
   let len = 0;
   const flush = () => {
-    if (!cur.length) return;
-    out.push({ id: prefix + (out.length + 1), sec, s: cur, t: cur.join(' ') });
+    if (cur.length) groups.push(cur);
     cur = [];
     len = 0;
   };
-  for (const s of sentences) {
-    cur.push(s);
-    len += s.length;
-    if (cur.length >= 3 || len > 300) flush();
+  for (const x of sents) {
+    cur.push(x);
+    len += x.t.length;
+    if (cur.length >= maxSent || len >= targetChars) flush();
   }
   flush();
+  // 짧은 조각(특히 쪽·자료 끝의 꼬리)은 앞 청크에 붙이고, 맨 앞이 짧으면 뒤 청크에 붙인다.
+  const merged: Sent[][] = [];
+  for (const g of groups) {
+    const prev = merged[merged.length - 1];
+    if (prev && size(g) < minChars && size(prev) + size(g) <= hardMaxChars) prev.push(...g);
+    else merged.push(g);
+  }
+  if (merged.length > 1 && size(merged[0]) < minChars && size(merged[0]) + size(merged[1]) <= hardMaxChars) {
+    merged[1] = [...merged[0], ...merged[1]];
+    merged.shift();
+  }
+  return merged.map((g, i) => ({ id: prefix + (i + 1), sec: sec(g[0], g[g.length - 1]), s: g.map((x) => x.t), t: g.map((x) => x.t).join(' ') }));
+}
+
+export function buildChunks(text: string, sec: string, prefix: string): Chunk[] {
+  const sents = splitSentences(text.replace(/\s+/g, ' ').trim()).filter((t) => !isNoiseSentence(t));
+  return packSentences(sents.map((t) => ({ t })), () => sec, prefix);
+}
+
+// 쪽 번호 구간 레이블("3쪽", "3–4쪽")에서 쪽 범위를 읽는다.
+const PAGE_SEC = /^(\d+)(?:[–-](\d+))?쪽$/;
+export const isPageSec = (sec: string) => PAGE_SEC.test(sec);
+
+// 여러 섹션을 올 때, 이어지는 쪽 섹션("N쪽")은 쪽 경계 없이 한 흐름으로 합쳐 청킹한다(쪽 끝에서 문장·청크가 끊기지 않게).
+// 청크의 sec은 시작·끝 쪽으로 만든다("3쪽" 또는 "3–4쪽"). 그 밖의 섹션은 섹션마다 따로 자른다.
+// 청크 ID 접두사는 한 흐름의 첫 섹션 번호(sectionOffset + 위치 + 1)를 쓴다. 호출마다 sectionOffset이 이어지므로 겹치지 않는다.
+export function buildChunksFromSections(sections: { sec: string; text: string }[], sectionOffset = 0): Chunk[] {
+  const out: Chunk[] = [];
+  let i = 0;
+  while (i < sections.length) {
+    const first = PAGE_SEC.exec(sections[i].sec);
+    if (!first) {
+      out.push(...buildChunks(sections[i].text, sections[i].sec, `p${sectionOffset + i + 1}-`));
+      i++;
+      continue;
+    }
+    let j = i;
+    const pages: { n: number; text: string }[] = [];
+    for (; j < sections.length; j++) {
+      const m = PAGE_SEC.exec(sections[j].sec);
+      if (!m) break;
+      pages.push({ n: +m[1], text: sections[j].text.replace(/\s+/g, ' ').trim() });
+    }
+    let joined = '';
+    const starts: { at: number; n: number }[] = [];
+    pages.forEach((pg) => {
+      if (joined) joined += ' ';
+      starts.push({ at: joined.length, n: pg.n });
+      joined += pg.text;
+    });
+    const sents: Sent[] = [];
+    let pos = 0;
+    for (const t of splitSentences(joined)) {
+      const at = joined.indexOf(t, pos);
+      pos = (at < 0 ? pos : at) + t.length;
+      if (isNoiseSentence(t)) continue;
+      let n = starts[0].n;
+      for (const st of starts) if (st.at <= Math.max(at, 0)) n = st.n;
+      sents.push({ t, page: n });
+    }
+    const label = (a: Sent, b: Sent) => (a.page === b.page ? `${a.page}쪽` : `${a.page}–${b.page}쪽`);
+    out.push(...packSentences(sents, label, `p${sectionOffset + i + 1}-`));
+    i = j;
+  }
   return out;
 }
 
@@ -226,7 +304,9 @@ export function contextIds(
   before = CONFIG.ctxBefore,
   after = CONFIG.ctxAfter,
 ): string[] {
-  const at = new Map(pool.filter((c) => c.sec === core.sec).map((c) => [c.idx, c.id]));
+  // 쪽 번호 섹션("3쪽", "3–4쪽")은 논리적 경계가 아니므로 하나의 흐름으로 본다. 그 밖의 섹션은 같은 섹션 안에서만 이웃을 붙인다.
+  const grp = (sec: string) => (isPageSec(sec) ? '\u0000pages' : sec);
+  const at = new Map(pool.filter((c) => grp(c.sec) === grp(core.sec)).map((c) => [c.idx, c.id]));
   const ids: string[] = [];
   for (let k = before; k >= 1; k--) {
     const id = at.get(core.idx - k);
