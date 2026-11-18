@@ -76,7 +76,7 @@ async function withBusy(msg, fn) {
   const done = busy(msg);
   try { return await fn(); } finally { done(); }
 }
-const secLabel = (sec) => (/^(\d+)쪽$/.exec(sec) ? `p.${/^(\d+)쪽$/.exec(sec)[1]}` : sec);
+const secLabel = (sec) => { const m = /^(\d+)(?:[–-](\d+))?쪽$/.exec(sec); return m ? (m[2] ? `p.${m[1]}–${m[2]}` : `p.${m[1]}`) : sec; };
 const short = (s, n = 12) => (s.length > n ? s.slice(0, n) + '…' : s);
 const pct = (v) => `${+(v * 100).toFixed(1)}%`;
 function reqTitle(i) { const m = S.plan.missions[i]; return S.plan.reqs[m.req - 1] || `미션 ${i + 1}`; }
@@ -166,8 +166,8 @@ async function readPdf(file) {
   return { sections, pages: pdf.numPages, lang: ko > 0.2 ? 'ko' : 'en' };
 }
 
-// 자료를 작게 나눠 올린다. 서버는 한 번에 청크 30개까지만 받는다(임베딩 계산량 때문). 한 쪽은 보통 청크 10개 안팎이다.
-const BATCH_CHARS = 1200; // 작게 보낸다: 한 호출의 계산량이 서버 한도를 넘지 않게
+// 자료를 나눠 올린다. 서버는 한 번에 청크 30개까지만 받는다. 청크는 약 400자이므로 6000자 배치는 청크 15개 안팎이다.
+const BATCH_CHARS = 6000; // 임베딩을 외부 API로 받으므로 서버 계산 부담이 작다. 여러 쪽을 한 번에 보내 왕복을 줄이고, 쪽 경계에서 청크가 끊기는 곳도 줄인다(청크 약 15개).
 async function uploadSource(title, pdf) {
   const batches = [];
   let cur = [], len = 0;
