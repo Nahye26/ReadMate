@@ -86,7 +86,7 @@ async function questionSetFor(
   const hasReqs = reqs.length >= 2;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const data = await askJson(buildPlanPrompt({ assignment: a.assignment, candidates, fast: a.fast, basis: a.basis, reqs: hasReqs ? reqs : undefined, groups, retryNote: note }));
+      const data = await askJson(buildPlanPrompt({ assignment: a.assignment, candidates, fast: a.fast, basis: a.basis, reqs: hasReqs ? reqs : undefined, groups, retryNote: note }), undefined, 'plan');
       const tried = cleanPlan(data, candidates, { maxMissions: a.fast ? 2 : undefined, reqs: hasReqs ? reqs : undefined, allowed });
       const minM = a.fast ? 1 : CONFIG.minMissions;
       const better = !plan || (tried.uncovered?.length ?? 0) < (plan.uncovered?.length ?? 99) ||

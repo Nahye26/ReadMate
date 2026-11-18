@@ -175,6 +175,7 @@ flowchart LR
 - service role 함수는 RLS를 우회하므로 호출 때마다 접근 권한을 직접 확인한다: 자료 소유자이거나 `sources.shared`인 자료만 쓴다. (`plan-session`에 구현)
 - `question_sets.plan`에는 판정 기준(key_points)이 있으므로 `mission_secrets`처럼 클라이언트 접근을 전부 막았다.
 - 비밀값: `GEMINI_API_KEY`, `GEMINI_MODEL`은 `supabase secrets`로만 설정한다. 저장소에 두지 않는다. (`.gitignore`에 `.env` 포함)
+- 단계별 모델(2026-11-18): `GEMINI_MODEL_PLAN`(읽기 계획 생성), `GEMINI_MODEL_JUDGE`(판정·힌트·보완)은 선택 비밀값이다. 없으면 `GEMINI_MODEL`을 쓰고, 인출·연결은 항상 `GEMINI_MODEL`이다(`llm.ts`의 `modelFor`). 예비 모델(`GEMINI_FALLBACK_MODELS`)은 단계와 관계없이 같다. `sessions.model`에는 `plan:… judge:… light:…`로 기록된다.
 - 동의 2종: `consent_research`(횟수·점수 요약 익명 저장), `consent_answers`(답변 원문 저장). 후자가 아니면 답변 원문과 과제 안내문을 저장하지 않는다.
 - 외부 LLM 전송: 자료와 답변이 Gemini로 전송된다. **학습 조항 포함 여부를 동의서에 쓰고 IRB 담당자에게 확인**하기로 한 기존 결정이 이 구조에도 그대로 적용된다.
 

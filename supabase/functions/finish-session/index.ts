@@ -12,6 +12,7 @@ import {
   connectState, currentMission, DEFAULT_FLOW, missionRecords, recallState, recallTargets, summarize, type Condition, type FlowOpts,
 } from '../_shared/core.ts';
 import { authedUser, corsHeaders, json, serviceClient } from '../_shared/http.ts';
+import { modelFor, type LlmRole } from '../_shared/llm.ts';
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
@@ -69,7 +70,7 @@ Deno.serve(async (req) => {
   if (!records.length) return json({ error: 'nothing_to_summarize', message: '시작한 미션이 없습니다' }, 409);
 
   const s = summarize({
-    model: Deno.env.get('GEMINI_MODEL') ?? 'unknown',
+    model: ['plan', 'judge', 'light'].map((r) => `${r}:${modelFor(r as LlmRole) ?? 'unknown'}`).join(' '), // 단계별 모델(폴백으로 바뀐 경우는 기록되지 않는다)
     condition,
     paperId: ses.paper_id ?? '',
     missions: records,

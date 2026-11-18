@@ -135,6 +135,8 @@ Deno.serve(async (req) => {
     try {
       const data = await askJson(
         buildHintPrompt({ level: level as 1 | 2 | 3, req: reqText, question: variant.question, keys, core: coreView }),
+        undefined,
+        'judge',
       );
       if (level === 2) {
         // 인용문은 LLM이 쓴 글이 아니라 서버가 원문에서 꺼낸다. 위치만 알려 주고 끝내지 않는다.
@@ -193,6 +195,8 @@ Deno.serve(async (req) => {
         req: reqText, qtype: qtype as QType, question: variant.question, keys, core: coreView, context, answer,
         revision: state.attempts > 0,
       }),
+      undefined,
+      'judge',
     );
     if (!VERDICTS.includes(d?.verdict)) throw new LlmError('invalid_json', '판정 값이 올바르지 않습니다');
     verdict = d.verdict;
