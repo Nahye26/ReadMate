@@ -160,7 +160,7 @@ flowchart LR
 
 ## 7. 임베딩 설계
 
-- 모델: Gemini `gemini-embedding-001`을 384차원으로 줄여 사용(`GEMINI_API_KEY` 재사용, `GEMINI_EMBED_MODEL`로 변경 가능). 처음에는 내장 `gte-small`을 썼으나 Edge Function CPU 시간 한도("CPU Time exceeded")로 PDF 업로드가 실패해 서버 밖으로 옮겼다. 차원을 유지해 마이그레이션은 없다. 모델이 바뀌어 gte-small로 저장된 자료는 다시 올려야 한다.
+- 모델: Gemini `gemini-embedding-001`을 384차원으로 줄여 사용(`GEMINI_API_KEY` 재사용, `GEMINI_EMBED_MODEL`로 변경 가능). 처음에는 내장 `gte-small`을 썼으나 Edge Function CPU 시간 한도("CPU Time exceeded")로 PDF 업로드가 실패해 서버 밖으로 옮겼다. 차원을 유지해 마이그레이션은 없다. 모델이 바뀌어 gte-small로 저장된 자료는 다시 올려야 한다. 한도 오류(2026-11-18): 429 중 하루 한도 소진(`PerDay` 또는 `limit: 0`)은 재시도하지 않고 `quota_exhausted`(429)로 바로 돌려주며(재시도도 한도를 쓴다), 분당 한도는 Google이 알려 준 대기 시간(최대 30초)을 따라 재시도한다. 이미 저장된 같은 청크(같은 `source_id`·ID·텍스트)는 다시 임베딩하지 않는다. 오류 메시지는 600자까지 보존한다. 하루 한도는 태평양시 자정(한국 시간 오후 4~5시)에 초기화된다.
 - 청킹은 문단(문장 묶음) 단위. 질의는 학생 답변이 아니라 **과제 안내문**이다.
 - A/B가 같은 검색 결과를 쓰고, B만 앞뒤 청크를 더한다 → 변인이 텍스트 제공 방식 하나로 유지된다.
 - 한계 1: 다국어 모델이라 한국어 자료도 다루지만, 한국어 검색 품질은 실제 자료로 확인하지 못했다.

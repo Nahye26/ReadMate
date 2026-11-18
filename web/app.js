@@ -53,11 +53,13 @@ async function call(name, body) {
 function errCopy(e) {
   const c = e?.code;
   if (c === 'rate_limited') return 'AI 요청이 몰려 있어요. 잠시 뒤에 다시 시도해 주세요.';
+  if (c === 'quota_exhausted') return 'AI 임베딩의 하루 사용 한도를 다 썼어요. 한도는 한국 시간으로 오후 4~5시(태평양시 자정)에 초기화돼요. 그 뒤에 다시 시도하거나 연구자에게 알려 주세요.';
+  if (c === 'embed_failed') return '자료를 분석하는 AI가 응답하지 않았어요. 잠시 뒤 다시 시도해 주세요.';
   if (c === 'timeout') return 'AI 응답이 늦어지고 있어요. 다시 시도해 주세요.';
   if (c === 'bad_key' || c === 'not_configured' || c === 'no_config') return '서비스 설정에 문제가 있어요. 연구자에게 알려 주세요.';
   if (c === 'invalid_json' || c === 'llm_failed') return 'AI 응답을 해석하지 못했어요. 다시 시도해 주세요.';
   if (c === 'batch_too_large') return '자료를 나눠 올리는 중 문제가 생겼어요. 다시 시도해 주세요.';
-  if (c === 'ingest_failed') return '자료를 저장하지 못했어요. 잠시 뒤 다시 시도하거나 더 짧은 PDF로 해 보세요.';
+  if (c === 'ingest_failed') return `자료를 저장하지 못했어요. 잠시 뒤 다시 시도하거나 더 짧은 PDF로 해 보세요.${e?.message && e.message !== c ? ` (원인: ${String(e.message).slice(0, 300)})` : ''}`;
   if (c === 'too_large') return '자료가 너무 길어요. 필요한 쪽만 잘라서 다시 올려 주세요.';
   if (c === 'empty_text') return '자료에서 글자를 읽지 못했어요. 글자를 선택할 수 있는 PDF인지 확인해 주세요.';
   if (c === 'toolong') return `PDF가 ${MAX_PAGES}쪽을 넘어요. 필요한 쪽만 잘라서 올려 주세요.`;

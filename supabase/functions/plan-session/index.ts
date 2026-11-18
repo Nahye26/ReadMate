@@ -11,7 +11,7 @@ import {
   CONFIG, cleanPlan, contextIds, DEFAULT_FLOW, estimateMins, EXPERIMENT_FLOW, normalizeAssignment, pickQtype, resolveExcerpts,
   basisFor, type Basis, type Chunk, type ChunkRef, type Condition, type PlanData,
 } from '../_shared/core.ts';
-import { embed, toVector } from '../_shared/embed.ts';
+import { embed, EmbedError, toVector } from '../_shared/embed.ts';
 import { authedUser, corsHeaders, json, serviceClient } from '../_shared/http.ts';
 import { askJson, LlmError } from '../_shared/llm.ts';
 import { buildPlanPrompt } from '../_shared/prompts.ts';
@@ -49,9 +49,16 @@ async function questionSetFor(
   }
 
   // 후보는 검색 결과 그대로다. 앞뒤 청크는 계획 단계에서 보여 주지 않는다(A 기준 입력).
+  let queryVec: string;
+  try {
+    queryVec = toVector(await embed(a.assignment, 'RETRIEVAL_QUERY'));
+  } catch (e) {
+    if (e instanceof EmbedError) throw new PlanError(e.code === 'embed_failed' ? 502 : 429, e.code === 'embed_failed' ? 'embed_failed' : e.code, e.message);
+    throw e;
+  }
   const { data: hits, error: hitErr } = await db.rpc('match_chunks', {
     p_source: a.sourceId,
-    p_query: toVector(await embed(a.assignment, 'RETRIEVAL_QUERY')),
+    p_query: queryVec,
     p_k: TOP_K,
   });
   if (hitErr || !hits?.length) throw new PlanError(500, 'retrieval_failed', hitErr?.message);

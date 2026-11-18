@@ -8,7 +8,7 @@
 // 출력: { source_id, chunks, next_idx }   (chunks: 이번 호출에서 저장한 수, next_idx: 다음 호출의 idx_start)
 // 같은 호출을 다시 보내도 안전하다(같은 청크 ID는 덮어쓴다). 클라이언트는 실패한 배치만 다시 보낸다.
 import { buildChunks, type Chunk } from '../_shared/core.ts';
-import { embedMany, toVector } from '../_shared/embed.ts';
+import { EmbedError, embedMany, toVector } from '../_shared/embed.ts';
 import { authedUser, corsHeaders, json, serviceClient } from '../_shared/http.ts';
 
 const MAX_CHUNKS_PER_CALL = 30;
@@ -71,14 +71,24 @@ Deno.serve(async (req) => {
   if (create) return json({ source_id: sourceId, chunks: 0, next_idx: 0 });
 
   try {
+    // 이미 이 자료에 같은 내용으로 저장된 청크는 다시 임베딩하지 않는다(재시도·중복 호출이 한도를 쓰지 않게).
+    const ids = chunks.map((c) => c.id);
+    const { data: have } = await db.from('chunks').select('id, text').eq('source_id', sourceId).in('id', ids).not('embedding', 'is', null);
+    const done = new Map<string, string>((have ?? []).map((r: { id: string; text: string }) => [r.id, r.text]));
+    const todo = chunks.filter((c) => done.get(c.id) !== c.t);
+
     // 임베딩은 Gemini API 한 번(배치)으로 받는다. 서버 CPU를 거의 쓰지 않는다.
-    const vecs = await embedMany(chunks.map((c) => c.t), 'RETRIEVAL_DOCUMENT');
-    const rows = chunks.map((c, i) => ({ source_id: sourceId, id: c.id, idx: idxStart + i, sec: c.sec, sentences: c.s, text: c.t, embedding: toVector(vecs[i]) }));
-    for (let i = 0; i < rows.length; i += 100) {
-      const { error } = await db.from('chunks').upsert(rows.slice(i, i + 100), { onConflict: 'source_id,id' });
-      if (error) throw new Error(error.message);
+    if (todo.length) {
+      const vecs = await embedMany(todo.map((c) => c.t), 'RETRIEVAL_DOCUMENT');
+      const rows = todo.map((c, i) => ({ source_id: sourceId, id: c.id, idx: idxStart + chunks.indexOf(c), sec: c.sec, sentences: c.s, text: c.t, embedding: toVector(vecs[i]) }));
+      for (let i = 0; i < rows.length; i += 100) {
+        const { error } = await db.from('chunks').upsert(rows.slice(i, i + 100), { onConflict: 'source_id,id' });
+        if (error) throw new Error(error.message);
+      }
     }
   } catch (e) {
+    if (e instanceof EmbedError && e.code === 'quota_exhausted') return json({ error: 'quota_exhausted', message: e.message }, 429);
+    if (e instanceof EmbedError && e.code === 'rate_limited') return json({ error: 'rate_limited', message: e.message }, 429);
     return json({ error: 'ingest_failed', message: (e as Error).message }, 500);
   }
 
