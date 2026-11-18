@@ -23,6 +23,7 @@ export const READING_TYPE: Record<Condition, string> = { A: '발췌형', B: '맥
 //   B = 핵심 청크 + 앞 ctxBefore개 + 뒤 ctxAfter개 (최대 MAX_TEXT_UNITS개 청크)
 export const CONFIG = {
   missions: 6, // 한 세션은 최소 30분(minMins)이 되도록 구성한다. 미션당 약 5분(조건 B) × 6 + 인출·연결 (2026-11-18)
+  minMissions: 3, // 마무리(인출·예측·연결)를 뺀 미션 최소 개수. 요구 항목이 적어도 3개 미만으로 내보내지 않는다
   maxMissions: 6, // 전체 상한. 소요 시간(미션당 약 5분)과 LLM 호출(미션당 약 2~2.5회)이 함께 늘어난다
   minMins: 30, // 세션 소요 시간 하한(분). plan-session이 추정치를 응답에 담아 미달 여부를 알린다
   recallMins: 5, // 모든 미션 뒤 인출·예측·연결에 드는 시간 추정(분)
@@ -284,22 +285,39 @@ export function cleanPlan(
     });
   });
 
-  // 요구 항목당 perReqMax개, 같은 핵심 청크는 한 번만(다른 항목이어도 같은 대목을 두 번 묻지 않는다). 항목 순서로 정렬해
-  // 과제 요구를 앞에서부터 읽게 하고, 전체는 maxMissions에서 자른다. fast(미션 2개)는 항목당 상한을 두지 않는다.
-  const perReq = new Map<number, number>();
+  // 미션 고르기: 1) 요구 항목마다 먼저 하나씩(항목 순서대로) 담아 모든 항목이 덮이게 하고, 2) 남는 자리는 항목을 돌아가며 채운다.
+  // 항목당 perReqMax개, 전체 maxMissions개. 같은 핵심 청크는 가능하면 한 번만 쓴다(항목을 덮을 다른 방법이 없을 때만 다시 쓴다).
+  // 예전에는 항목 순서로 정렬한 뒤 앞에서 자르는 바람에 뒤쪽 항목의 미션이 통째로 잘려 나가 일부 항목만 읽게 됐다.
+  // fast(maxMissions 지정)는 항목당 상한 없이 같은 순서로 채운다.
+  const max = opts.maxMissions ?? CONFIG.maxMissions;
+  const perReqCap = opts.maxMissions ? Infinity : CONFIG.perReqMax;
+  const indexed = missions.map((m, i) => ({ m, i }));
+  const chosen: { m: Mission; i: number }[] = [];
   const usedChunk = new Set<string>();
-  const kept = missions
-    .map((m, i) => ({ m, i }))
-    .sort((a, b) => a.m.req - b.m.req || a.i - b.i)
-    .filter(({ m }) => {
-      const n = perReq.get(m.req) ?? 0;
-      if (usedChunk.has(m.pick[0]) || (!opts.maxMissions && n >= CONFIG.perReqMax)) return false;
-      perReq.set(m.req, n + 1);
-      usedChunk.add(m.pick[0]);
-      return true;
-    })
-    .map(({ m }) => m)
-    .slice(0, opts.maxMissions ?? CONFIG.maxMissions);
+  const perReq = new Map<number, number>();
+  const take = (x: { m: Mission; i: number }) => {
+    chosen.push(x);
+    usedChunk.add(x.m.pick[0]);
+    perReq.set(x.m.req, (perReq.get(x.m.req) ?? 0) + 1);
+  };
+  for (let r = 1; r <= reqs.length && chosen.length < max; r++) {
+    const mine = indexed.filter((x) => x.m.req === r);
+    const first = mine.find((x) => !usedChunk.has(x.m.pick[0])) ?? mine[0];
+    if (first) take(first);
+  }
+  for (let round = 0; chosen.length < max && round < 8; round++) {
+    let added = false;
+    for (let r = 1; r <= reqs.length && chosen.length < max; r++) {
+      if ((perReq.get(r) ?? 0) >= perReqCap) continue;
+      const next = indexed.find((x) => x.m.req === r && !chosen.includes(x) && !usedChunk.has(x.m.pick[0]));
+      if (next) {
+        take(next);
+        added = true;
+      }
+    }
+    if (!added) break;
+  }
+  const kept = chosen.sort((x, y) => x.m.req - y.m.req || x.i - y.i).map((x) => x.m);
 
   if (!kept.length) throw new Error('no valid mission');
   // 미션이 하나도 없는 요구 항목(1부터). 호출한 쪽이 한 번 더 시도하거나 기록한다.

@@ -84,13 +84,16 @@ async function questionSetFor(
   let note: string | undefined;
   let lastErr: unknown;
   const hasReqs = reqs.length >= 2;
-  for (let attempt = 0; attempt < (hasReqs ? 2 : 1); attempt++) {
+  for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const data = await askJson(buildPlanPrompt({ assignment: a.assignment, candidates, fast: a.fast, basis: a.basis, reqs: hasReqs ? reqs : undefined, groups, retryNote: note }));
       const tried = cleanPlan(data, candidates, { maxMissions: a.fast ? 2 : undefined, reqs: hasReqs ? reqs : undefined, allowed });
-      if (!plan || (tried.uncovered?.length ?? 0) < (plan.uncovered?.length ?? 99)) plan = tried;
-      if (!plan.uncovered?.length) break;
-      note = `이전 시도에서 요구 ${plan.uncovered.join(', ')}에 미션이 없었습니다. 그 요구 항목마다 미션을 하나 이상, 해당 요구의 후보에서 고르세요.`;
+      const minM = a.fast ? 1 : CONFIG.minMissions;
+      const better = !plan || (tried.uncovered?.length ?? 0) < (plan.uncovered?.length ?? 99) ||
+        ((tried.uncovered?.length ?? 0) === (plan.uncovered?.length ?? 99) && tried.missions.length > plan.missions.length);
+      if (better) plan = tried;
+      if (!plan.uncovered?.length && plan.missions.length >= minM) break;
+      note = plan.uncovered?.length ? `이전 시도에서 요구 ${plan.uncovered.join(', ')}에 미션이 없었습니다. 그 요구 항목마다 미션을 하나 이상, 해당 요구의 후보에서 고르세요.` : `이전 시도의 미션이 ${plan.missions.length}개뿐이었습니다. 마무리를 뺀 미션을 최소 ${minM}개 만드세요.`;
     } catch (e) {
       lastErr = e;
       if (e instanceof LlmError && e.code === 'rate_limited') break; // 한도에 걸렸으면 바로 다시 보내지 않는다
@@ -245,6 +248,7 @@ Deno.serve(async (req) => {
     est_mins: estMins,
     uncovered_reqs: plan.uncovered ?? [], // 미션이 없는 요구 항목(1부터). 비어 있어야 정상이다
     below_min_mins: !fast && estMins < CONFIG.minMins,
+    below_min_missions: !fast && plan.missions.length < CONFIG.minMissions, // 재시도 후에도 마무리 제외 미션이 최소 개수에 못 미침
     flow,
     // 첫 미션의 안내 수준·깊이·질문 유형. 이후 미션은 submit-answer가 미션이 끝날 때마다 next_support로 돌려준다.
     start_support: {
