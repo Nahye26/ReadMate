@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert';
 import { createRequire } from 'node:module';
 import {
-  buildChunks, resolvePick, validateQuote, isCopy, cleanPlan, nextSupport, calibrate,
+  buildChunks, buildChunksFromSections, CHUNK_CONFIG, resolvePick, validateQuote, isCopy, cleanPlan, nextSupport, calibrate,
   summarize, EXPERIMENT_FLOW, DEFAULT_FLOW, contextIds, resolveExcerpts, estimateMins, normalizeAssignment,
   CONFIG, MAX_TEXT_UNITS, MAX_HINT, missionState, currentMission, answerOutcome, leaksKey, sentenceNums, pickQtype, supportBefore,
 } from './core.ts';
@@ -15,11 +15,61 @@ const TEXT =
   '퀵리뷰는 오답 직후 해설을 띄운다. 실험에서 점수는 올랐다. 그러나 설문 응답은 부정적이었다. ' +
   '지속률은 낮아졌다. 저자는 점수만 보지 말라고 한다.';
 
-test('청킹: 문장 3개 단위로 자르고 ID를 붙인다', () => {
+test('청킹: 짧은 글은 한 청크, ID를 붙인다', () => {
   const chunks = buildChunks(TEXT, '본문 1문단', 't1-');
-  assert.strictEqual(chunks.length, 2);
-  assert.deepStrictEqual(chunks.map((c) => c.id), ['t1-1', 't1-2']);
-  assert.strictEqual(chunks[0].s.length, 3);
+  assert.strictEqual(chunks.length, 1);
+  assert.deepStrictEqual(chunks.map((c) => c.id), ['t1-1']);
+  assert.strictEqual(chunks[0].s.length, 5);
+});
+
+test('청킹: 문장 수·글자 수 상한에서 끊고, 짧은 꼬리는 앞 청크에 합친다', () => {
+  const sent = (n: number, len: number, tag = '문장') => Array.from({ length: n }, (_, i) => `${tag}${i + 1}`.padEnd(len, '가') + '.').join(' ');
+  // 보통 길이 문장 20개(약 40자): 문장 수 상한(maxSent)에서 끊기고 문장을 잃지 않는다.
+  const a = buildChunks(sent(20, 40), 's', 'a-');
+  assert.ok(a.length >= 3 && a.every((c) => c.s.length <= CHUNK_CONFIG.maxSent));
+  assert.strictEqual(a.flatMap((c) => c.s).length, 20);
+  // 긴 문장 10개(약 120자): 글자 수(targetChars)에 닿으면 끊는다.
+  const b = buildChunks(sent(10, 120), 's', 'b-');
+  assert.ok(b.length >= 3 && b.every((c) => c.s.length <= 4));
+  // 끝의 짧은 꼬리(150자 미만)는 앞 청크에 붙어 따로 남지 않는다.
+  const c = buildChunks(sent(4, 110) + ' ' + sent(1, 20, '꼬리'), 's', 'c-');
+  assert.strictEqual(c.length, 1);
+  assert.strictEqual(c[0].s.length, 5);
+  // 합쳐서 hardMaxChars를 넘기면 합치지 않는다.
+  const d = buildChunks(sent(6, 125) + ' ' + sent(1, 100, '꼬리'), 's', 'd-');
+  assert.ok(d.length >= 2);
+});
+
+test('청킹: 쪽번호·구분선 같은 조각은 버린다', () => {
+  const chunks = buildChunks('첫 문장은 내용이 있다. 63 ━━━━ 둘째 문장도 내용이 있다. 79', 's', 'n-');
+  assert.ok(chunks.flatMap((c) => c.s).every((x) => /[가-힣]/.test(x)));
+});
+
+test('청킹: 이어지는 쪽 섹션은 쪽 경계 없이 한 흐름으로 합치고, 레이블은 시작·끝 쪽으로 만든다', () => {
+  const body = (tag: string, n: number) => Array.from({ length: n }, (_, i) => `${tag}${i + 1}번째 문장은 이렇게 꽤 길게 이어져서 내용을 담고 있습니다.`).join(' ');
+  // 1쪽 끝 문장이 2쪽 첫 조각과 이어지는 경우(문장이 쪽을 넘는다)
+  const p1 = body('가', 5) + ' 쪽을 넘어가는 문장은 여기서 시작해서';
+  const p2 = '다음 쪽에서 끝납니다. ' + body('나', 5);
+  const cs = buildChunksFromSections([{ sec: '1쪽', text: p1 }, { sec: '2쪽', text: p2 }], 0);
+  assert.ok(cs.some((c) => c.t.includes('여기서 시작해서 다음 쪽에서 끝납니다.')), '쪽을 넘는 문장은 한 문장으로 복원된다');
+  assert.ok(cs.some((c) => c.sec === '1–2쪽'));
+  assert.ok(cs.every((c) => /^\d+(–\d+)?쪽$/.test(c.sec)));
+  // 호출이 달라도 ID가 겹치지 않는다(sectionOffset이 이어진다)
+  const next = buildChunksFromSections([{ sec: '3쪽', text: body('다', 8) }], 2);
+  assert.strictEqual(new Set([...cs, ...next].map((c) => c.id)).size, cs.length + next.length);
+  // 쪽이 아닌 섹션은 따로 자른다
+  const mixed = buildChunksFromSections([{ sec: '서론', text: body('라', 3) }, { sec: '본문', text: body('마', 3) }], 0);
+  assert.deepStrictEqual([...new Set(mixed.map((c) => c.sec))], ['서론', '본문']);
+});
+
+test('이웃 청크: 쪽 번호 섹션끼리는 경계 없이 붙고, 그 밖의 섹션은 같은 섹션 안에서만 붙는다', () => {
+  const pool = [
+    { id: 'x1', idx: 0, sec: '1쪽' }, { id: 'x2', idx: 1, sec: '1–2쪽' }, { id: 'x3', idx: 2, sec: '2쪽' },
+    { id: 'y1', idx: 3, sec: '서론' }, { id: 'y2', idx: 4, sec: '본문' },
+  ];
+  assert.deepStrictEqual(contextIds(pool[1], pool), ['x1', 'x2', 'x3']);
+  assert.deepStrictEqual(contextIds(pool[2], pool), ['x2', 'x3']); // 뒤는 쪽이 아닌 섹션이라 붙이지 않는다
+  assert.deepStrictEqual(contextIds(pool[3], pool), ['y1']);
 });
 
 test('발췌 해석·인용 검증', () => {
