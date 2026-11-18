@@ -75,6 +75,33 @@ test('계획 검증: 후보에 없는 청크·범위 밖 문장은 버리고, �
   assert.throws(() => cleanPlan({ reqs: [], missions: [] }, chunks), /no reqs/);
 });
 
+test('계획 검증: 요구 항목당 상한, 같은 청크는 한 번만, 항목 순서로 정렬, 전체 상한', () => {
+  const ids = Array.from({ length: 12 }, (_, i) => 'p' + (i + 1));
+  const chunks = ids.map((id) => ({ id, sec: 's', s: ['a.', 'b.'], t: 'a. b.' }));
+  const mk = (req: number, id: string) => ({
+    req, picks: [{ chunk_id: id, from: 1, to: 2 }],
+    variants: [{ qtype: 'literal', question: 'q', key_points: ['k'], cue: 'c', frame: 'f ____' }],
+  });
+  // 항목 3이 먼저 나오고, 항목 1에는 상한보다 1개 더 많이, p2는 다른 항목에서 다시 고름(버림)
+  const r1 = Array.from({ length: CONFIG.perReqMax + 1 }, (_, i) => mk(1, ids[i]));
+  const data = { reqs: ['r1', 'r2', 'r3'], missions: [mk(3, 'p10'), ...r1, mk(2, 'p2'), mk(2, 'p11'), mk(3, 'p12')] };
+  const p = cleanPlan(data, chunks);
+  const reqs = p.missions.map((m) => m.req);
+  assert.deepStrictEqual(reqs, [...reqs].sort((x, y) => x - y)); // 항목 순서
+  assert.ok(reqs.filter((r) => r === 1).length <= CONFIG.perReqMax);
+  const cores = p.missions.map((m) => m.pick[0]);
+  assert.strictEqual(new Set(cores).size, cores.length); // 같은 청크 중복 없음
+  assert.ok(p.missions.length <= CONFIG.maxMissions);
+  // fast(maxMissions=2)는 항목당 상한 없이 앞에서 2개만
+  assert.strictEqual(cleanPlan(data, chunks, { maxMissions: 2 }).missions.length, 2);
+});
+
+test('세션 구성: 기본 미션 수와 시간 추정이 최소 30분을 채운다(조건 B 청크 3개 ≈ 900자)', () => {
+  const perMission = estimateMins(MAX_TEXT_UNITS * 300);
+  assert.ok(CONFIG.missions * perMission + CONFIG.recallMins >= CONFIG.minMins);
+  assert.ok(CONFIG.missions <= CONFIG.maxMissions);
+});
+
 // 한 절 'a'(idx 0~3)와 다음 절 'b'(idx 4~5)
 const pool = [
   { id: 'a1', idx: 0, sec: 'a' }, { id: 'a2', idx: 1, sec: 'a' }, { id: 'a3', idx: 2, sec: 'a' }, { id: 'a4', idx: 3, sec: 'a' },
