@@ -62,10 +62,11 @@ export function splitSentences(t: string): string[] {
 // 청크 크기 (2026-11-18): 한국어 학술문은 3문장·300자 단위로 자르면 청크가 평균 160자로 너무 짧아(조건 B 발췌 약 490자) 읽기가 부족했다.
 // 문장 수와 글자 수 둘 중 먼저 닿는 쪽에서 끊되, 짧은 조각은 이웃에 합친다. 글자 수 자체에 선행연구 근거는 없고 파일럿으로 조정하는 값이다.
 export const CHUNK_CONFIG = {
-  maxSent: 7, // 한 청크의 문장 수 상한
-  targetChars: 400, // 이 글자 수에 닿으면 끊는다
-  minChars: 150, // 이보다 짧은 청크는 이웃과 합친다
-  hardMaxChars: 800, // 합친 뒤에도 넘기지 않는 상한(문장 하나가 매우 긴 경우는 예외)
+  minSent: 5, // 한 청크의 문장 수 하한(자료 전체가 이보다 짧은 경우만 예외)
+  maxSent: 10, // 한 청크의 문장 수 상한
+  targetChars: 700, // 문장 수가 하한 이상일 때 이 글자 수에 닿으면 끊는다
+  minChars: 400, // 이보다 짧은 청크는 이웃과 합친다
+  // 글자 수 상한은 두지 않는다(문장 수 상한만 둔다).
 };
 
 // 쪽번호·구분선·한두 글자 조각처럼 읽을 내용이 없는 문장
@@ -74,9 +75,10 @@ export const isNoiseSentence = (s: string) => s.trim().length < 3 || /^[\d\s.,\-
 type Sent = { t: string; page?: number };
 
 function packSentences(sents: Sent[], sec: (first: Sent, last: Sent) => string, prefix: string): Chunk[] {
-  const { maxSent, targetChars, minChars, hardMaxChars } = CHUNK_CONFIG;
+  const { minSent, maxSent, targetChars, minChars } = CHUNK_CONFIG;
   const size = (g: Sent[]) => g.reduce((n, x) => n + x.t.length, 0);
-  let groups: Sent[][] = [];
+  const short = (g: Sent[]) => g.length < minSent || size(g) < minChars;
+  const groups: Sent[][] = [];
   let cur: Sent[] = [];
   let len = 0;
   const flush = () => {
@@ -87,20 +89,23 @@ function packSentences(sents: Sent[], sec: (first: Sent, last: Sent) => string, 
   for (const x of sents) {
     cur.push(x);
     len += x.t.length;
-    if (cur.length >= maxSent || len >= targetChars) flush();
+    if (cur.length >= maxSent || (len >= targetChars && cur.length >= minSent)) flush();
   }
   flush();
-  // 짧은 조각(특히 쪽·자료 끝의 꼬리)은 앞 청크에 붙이고, 맨 앞이 짧으면 뒤 청크에 붙인다.
+  // 짧은 조각(특히 쪽·자료 끝의 꼬리)은 이웃과 합친다. 합쳐서 문장 수 상한을 넘으면 반씩 나눠 두 청크 모두 하한을 지킨다.
+  const join = (a: Sent[], b: Sent[]): Sent[][] => {
+    const all = [...a, ...b];
+    if (all.length <= maxSent) return [all];
+    const h = Math.ceil(all.length / 2);
+    return [all.slice(0, h), all.slice(h)];
+  };
   const merged: Sent[][] = [];
   for (const g of groups) {
     const prev = merged[merged.length - 1];
-    if (prev && size(g) < minChars && size(prev) + size(g) <= hardMaxChars) prev.push(...g);
+    if (prev && short(g)) merged.splice(merged.length - 1, 1, ...join(prev, g));
     else merged.push(g);
   }
-  if (merged.length > 1 && size(merged[0]) < minChars && size(merged[0]) + size(merged[1]) <= hardMaxChars) {
-    merged[1] = [...merged[0], ...merged[1]];
-    merged.shift();
-  }
+  if (merged.length > 1 && short(merged[0])) merged.splice(0, 2, ...join(merged[0], merged[1]));
   return merged.map((g, i) => ({ id: prefix + (i + 1), sec: sec(g[0], g[g.length - 1]), s: g.map((x) => x.t), t: g.map((x) => x.t).join(' ') }));
 }
 

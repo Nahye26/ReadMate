@@ -22,22 +22,26 @@ test('청킹: 짧은 글은 한 청크, ID를 붙인다', () => {
   assert.strictEqual(chunks[0].s.length, 5);
 });
 
-test('청킹: 문장 수·글자 수 상한에서 끊고, 짧은 꼬리는 앞 청크에 합친다', () => {
+test('청킹: 문장 5~10개, 목표 700자에서 끊고, 짧은 꼬리는 이웃과 합친다', () => {
   const sent = (n: number, len: number, tag = '문장') => Array.from({ length: n }, (_, i) => `${tag}${i + 1}`.padEnd(len, '가') + '.').join(' ');
-  // 보통 길이 문장 20개(약 40자): 문장 수 상한(maxSent)에서 끊기고 문장을 잃지 않는다.
-  const a = buildChunks(sent(20, 40), 's', 'a-');
-  assert.ok(a.length >= 3 && a.every((c) => c.s.length <= CHUNK_CONFIG.maxSent));
-  assert.strictEqual(a.flatMap((c) => c.s).length, 20);
-  // 긴 문장 10개(약 120자): 글자 수(targetChars)에 닿으면 끊는다.
-  const b = buildChunks(sent(10, 120), 's', 'b-');
-  assert.ok(b.length >= 3 && b.every((c) => c.s.length <= 4));
-  // 끝의 짧은 꼬리(150자 미만)는 앞 청크에 붙어 따로 남지 않는다.
-  const c = buildChunks(sent(4, 110) + ' ' + sent(1, 20, '꼬리'), 's', 'c-');
+  const { minSent, maxSent } = CHUNK_CONFIG;
+  // 짧은 문장 25개(약 40자): 700자에 못 닿아도 문장 수 상한 10에서 끊고, 모든 청크가 5~10문장이며 문장을 잃지 않는다.
+  const a = buildChunks(sent(25, 40), 's', 'a-');
+  assert.ok(a.every((c) => c.s.length >= minSent && c.s.length <= maxSent));
+  assert.strictEqual(a.flatMap((c) => c.s).length, 25);
+  // 긴 문장 20개(약 120자): 5문장째(약 600자)는 700자 미만이라 6문장째에서 끊는다.
+  const b = buildChunks(sent(20, 120), 's', 'b-');
+  assert.ok(b.every((c) => c.s.length >= minSent && c.s.length <= maxSent));
+  assert.ok(b[0].t.length >= CHUNK_CONFIG.targetChars);
+  // 끝의 짧은 꼬리(5문장 미만)는 앞 청크에 붙어 따로 남지 않는다.
+  const c = buildChunks(sent(6, 125) + ' ' + sent(1, 20, '꼬리'), 's', 'c-');
   assert.strictEqual(c.length, 1);
-  assert.strictEqual(c[0].s.length, 5);
-  // 합쳐서 hardMaxChars를 넘기면 합치지 않는다.
-  const d = buildChunks(sent(6, 125) + ' ' + sent(1, 100, '꼬리'), 's', 'd-');
-  assert.ok(d.length >= 2);
+  assert.strictEqual(c[0].s.length, 7);
+  // 합쳐서 문장 수 상한을 넘으면 반씩 나눠 두 청크 모두 하한을 지킨다(글자 수 상한은 없다).
+  const d = buildChunks(sent(9, 60) + ' ' + sent(3, 60, '꼬리'), 's', 'd-'); // 9 + 3 = 12문장
+  assert.deepStrictEqual(d.map((x) => x.s.length), [6, 6]);
+  // 자료 전체가 하한보다 짧으면 있는 그대로 한 청크다.
+  assert.strictEqual(buildChunks(sent(3, 50), 's', 'e-')[0].s.length, 3);
 });
 
 test('문장 분리: 제목 번호(III. 1.)로 끝나는 짧은 조각은 뒤 문장과 합친다', () => {
@@ -60,8 +64,8 @@ test('청킹: 쪽번호·구분선 같은 조각은 버린다', () => {
 test('청킹: 이어지는 쪽 섹션은 쪽 경계 없이 한 흐름으로 합치고, 레이블은 시작·끝 쪽으로 만든다', () => {
   const body = (tag: string, n: number) => Array.from({ length: n }, (_, i) => `${tag}${i + 1}번째 문장은 이렇게 꽤 길게 이어져서 내용을 담고 있습니다.`).join(' ');
   // 1쪽 끝 문장이 2쪽 첫 조각과 이어지는 경우(문장이 쪽을 넘는다)
-  const p1 = body('가', 5) + ' 쪽을 넘어가는 문장은 여기서 시작해서';
-  const p2 = '다음 쪽에서 끝납니다. ' + body('나', 5);
+  const p1 = body('가', 4) + ' 쪽을 넘어가는 문장은 여기서 시작해서';
+  const p2 = '다음 쪽에서 끝납니다. ' + body('나', 9);
   const cs = buildChunksFromSections([{ sec: '1쪽', text: p1 }, { sec: '2쪽', text: p2 }], 0);
   assert.ok(cs.some((c) => c.t.includes('여기서 시작해서 다음 쪽에서 끝납니다.')), '쪽을 넘는 문장은 한 문장으로 복원된다');
   assert.ok(cs.some((c) => c.sec === '1–2쪽'));
