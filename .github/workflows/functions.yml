@@ -1,0 +1,29 @@
+# main에 push할 때마다 Supabase Edge Functions를 모두 배포한다(수동 배포를 잊어 옛 함수가 도는 문제를 막는다).
+# 처음 한 번: 저장소 Settings → Secrets and variables → Actions → New repository secret
+#   이름: SUPABASE_ACCESS_TOKEN   값: Supabase 대시보드 → Account → Access Tokens 에서 만든 토큰
+# 비밀값(GEMINI_API_KEY 등)은 Supabase에 이미 저장되어 있어 여기서 다루지 않는다.
+name: Deploy Supabase functions
+
+on:
+  push:
+    branches: [main]
+    paths: ['supabase/functions/**', '.github/workflows/functions.yml']
+  workflow_dispatch:
+
+concurrency:
+  group: functions
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      PROJECT_REF: gcqpbjyjpiryviulbbyq
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+      - name: Deploy all functions
+        run: supabase functions deploy --project-ref "$PROJECT_REF"
