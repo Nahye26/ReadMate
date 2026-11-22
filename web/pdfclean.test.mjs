@@ -132,7 +132,8 @@ test('쪽 경계에서 어절 중간이 끊기면 다음 쪽 맨 앞에 JOIN을 
 });
 
 test('stripUnsafe: NUL·제어 문자·짝 없는 서로게이트를 지우고 정상 글자는 둔다', () => {
-  assert.equal(stripUnsafe('교\u0000육\u0001'), '교육');
+  assert.equal(stripUnsafe('교\u0001육'), '교육');
+  assert.equal(stripUnsafe('aims\u0000to'), 'aims to');
   assert.equal(stripUnsafe('가\uD800나\uDC00다'), '가나다');
   assert.equal(stripUnsafe('😀 a\tb\n'), '😀 a\tb\n');
   assert.equal(stripUnsafe(undefined), '');
