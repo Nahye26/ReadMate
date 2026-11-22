@@ -174,7 +174,7 @@ async function readPdf(file) {
       const ol = await page.getOperatorList();
       images = imageRectsFromOps(ol.fnArray, ol.argsArray, lib.OPS, w, h);
     } catch (_) { /* 그림 영역 없이 진행 */ }
-    raw.push({ h, images, items: tc.items.map((it) => ({ s: it.str, x: it.transform[4], y: it.transform[5], eol: !!it.hasEOL, h: it.height, w: it.width, font: it.fontName })) });
+    raw.push({ h, images, items: tc.items.map((it) => ({ s: it.str.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, ''), x: it.transform[4], y: it.transform[5], eol: !!it.hasEOL, h: it.height, w: it.width, font: it.fontName })) });
   }
   const sections = [];
   cleanPages(raw).forEach((t, i) => { if (t.trim().length > 20) sections.push({ sec: `${i + 1}쪽`, text: t }); });

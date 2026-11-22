@@ -18,6 +18,9 @@ const MAX_CHUNKS_PER_CALL = 30;
 const MAX_CHUNKS_TOTAL = 800;
 const MAX_CHARS = 600_000;
 
+// PDF에서 나온 NUL(\u0000) 같은 제어 문자는 Postgres text/jsonb에 저장할 수 없다(unsupported Unicode escape sequence). 제목 표시용 사설 영역 문자(U+E000~E002)는 남긴다.
+const noCtl = (t: string) => t.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\uFFFE\uFFFF]/g, '');
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
   if (req.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
@@ -43,7 +46,7 @@ Deno.serve(async (req) => {
   const last = body?.last !== false; // 생략하면 마지막 배치로 본다(이월 없이 남김없이 저장)
   let secs: { sec: string; text: string }[] = create
     ? []
-    : sections.map((s: any, i: number) => ({ sec: String(s?.sec ?? `본문 ${sectionOffset + i + 1}`), text: String(s?.text ?? '') }));
+    : sections.map((s: any, i: number) => ({ sec: noCtl(String(s?.sec ?? `본문 ${sectionOffset + i + 1}`)), text: noCtl(String(s?.text ?? '')) }));
   if (carryIn && secs.length) secs[0] = { ...secs[0], text: prependCarry(carryIn, secs[0].text) };
   let carryOut = '';
   if (!last && secs.length) ({ sections: secs, carry: carryOut } = withholdTail(secs));
