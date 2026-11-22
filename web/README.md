@@ -9,6 +9,7 @@
 4. `web/` 폴더를 정적 호스팅(GitHub Pages, Netlify, Vercel 등)에 올린다. 로컬에서는 `npx serve web`.
 
 ## 주소 매개변수 (연구자용)
+- 자료 목록: `config.js`의 `PAPERS`에 미리 올려 둔 자료의 `source_id`를 넣으면 시작 화면에 목록이 나오고, 고르면 PDF를 다시 올리지 않고 그 자료로 계획을 만든다(`sources.shared = true` 필요). 비어 있으면 PDF 업로드 화면이 나온다. 고른 자료의 key(A/B)가 로그의 `paper_id`로 남는다.
 - `?source=<source_id>`: 연구자가 `sources.shared = true`로 표시해 둔 자료를 쓴다. PDF 업로드 칸이 사라진다.
 - `?researcher=이름`, `?paper=논문ID`: 세션에 기록된다.
 
