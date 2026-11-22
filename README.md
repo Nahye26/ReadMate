@@ -8,7 +8,7 @@ AI로 자료조사를 하는 대학생이 **원문을 직접 읽도록** 돕는 
 |---|---|
 | `index.html` | 데모(v0.4). 브라우저 안에서 PDF 처리부터 LLM 호출까지 한다. |
 | `docs/DESIGN.md` | 웹앱 설계 (아키텍처, 데이터 모델, 이식 지도, 실험 모드, 보안, 마일스톤) |
-| `supabase/migrations/` | DB 스키마 (pgvector, RLS) |
+| `supabase/migrations/` | DB 스키마 (pgvector, RLS). 마이그레이션은 수동 적용이므로 함수를 배포하기 전에 먼저 적용한다(`20261123000000_chunk_heads.sql`: 제목 문장 `chunks.heads`). 적용 전에는 제목이 굵게 표시되지 않을 뿐 동작은 같다. |
 | `web/` | 웹앱(정적 파일, 사용성 테스트용 B 고정). 배포 방법은 `web/README.md` |
 | `supabase/functions/` | Edge Function (`ingest-source`, `plan-session`, `submit-answer`, `report-question`, `recall`, `connect`, `finish-session`)과 공유 로직(`_shared/core.ts`) |
 | `eval/` | promptfoo 기록-재생 평가, 프롬프트 v0.5, 로그 검사기·집계 스크립트 |

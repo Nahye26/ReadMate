@@ -9,7 +9,7 @@
 //   - 같은 요청을 다시 보내면(이미 닫힌 세션) 저장된 요약을 그대로 돌려준다.
 // 요약은 연구 동의(consent_research)와 관계없이 본인 세션에 저장된다. 연구자용 research_summaries 뷰는 동의한 세션만 보여 준다.
 import {
-  connectState, currentMission, DEFAULT_FLOW, missionRecords, recallState, recallTargets, summarize, type Condition, type FlowOpts,
+  connectState, currentMission, DEFAULT_FLOW, levelInfos, missionRecords, recallState, recallTargets, summarize, type Condition, type FlowOpts,
 } from '../_shared/core.ts';
 import { authedUser, corsHeaders, json, serviceClient } from '../_shared/http.ts';
 import { modelFor, type LlmRole } from '../_shared/llm.ts';
@@ -44,7 +44,7 @@ Deno.serve(async (req) => {
   if (ses.finished_at) return json({ summary: ses.summary, already_finished: true });
 
   const [{ data: missions }, { data: turns }, { data: reports }] = await Promise.all([
-    db.from('missions').select('idx, context_ids').eq('session_id', session_id).order('idx'),
+    db.from('missions').select('idx, req, context_ids').eq('session_id', session_id).order('idx'),
     db.from('turns').select('mission_idx, kind, payload').eq('session_id', session_id).order('id'),
     db.from('events').select('data').eq('session_id', session_id).eq('type', 'question_report').order('id'),
   ]);
@@ -66,7 +66,9 @@ Deno.serve(async (req) => {
   const flow: FlowOpts = { fade: cfg.fade ?? DEFAULT_FLOW.fade, adaptDepth: cfg.adaptDepth ?? DEFAULT_FLOW.adaptDepth };
   const condition: Condition = ses.condition === 'A' ? 'A' : 'B'; // 사용성 테스트는 B만 쓴다. 조건이 없는 일반 세션은 B로 본다.
 
-  const { records, selfCorrections, boundary, evidenceCounts, idxs, recall } = missionRecords(history, missions ?? [], flow, condition);
+  const cfgAll = (ses.config ?? {}) as { reqs?: string[]; req_types?: unknown };
+  const levels = levelInfos(missions ?? [], cfgAll.reqs ?? [], cfgAll.req_types);
+  const { records, selfCorrections, boundary, evidenceCounts, idxs, recall } = missionRecords(history, missions ?? [], flow, condition, levels);
   if (!records.length) return json({ error: 'nothing_to_summarize', message: '시작한 미션이 없습니다' }, 409);
 
   const s = summarize({

@@ -3,7 +3,7 @@
 // 서버가 상태의 기준이다(진행 순서, 힌트·보완 횟수, 다음 안내 수준). 이 파일은 화면과 호출만 맡는다.
 // 새로고침하면 화면 상태는 사라진다(서버에 세션을 다시 불러오는 함수는 아직 없다).
 import { SUPABASE_URL, SUPABASE_ANON_KEY, CONDITION } from './config.js';
-import { cleanPages } from './pdfclean.mjs';
+import { cleanPages, imageRectsFromOps, HEAD_OPEN, HEAD_CLOSE } from './pdfclean.mjs';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
 const $ = (s, r = document) => r.querySelector(s);
@@ -11,6 +11,14 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 const params = new URLSearchParams(location.search);
 const MAX_PAGES = 40;
 const QLABEL = { literal: '이해', inferential: '추론', evaluative: '평가' };
+// 질문 단계(학습자가 고르지 않는다. 과제 요구 항목의 유형과 앞 미션 결과로 서버가 정한다)
+const LEVEL_LABEL = { literal: '1단계 · 정리', inferential: '2단계 · 추론', evaluative: '3단계 · 평가' };
+const REQ_TYPE_LABEL = { info: '정보 정리', analysis: '분석·설명', opinion: '의견·평가' };
+const evidenceMin = () => {
+  const m = S.plan.missions[S.mi];
+  const n = m.excerpts.reduce((c, e) => c + e.sentences.length - (e.heads || []).filter((h) => h >= (e.from || 1) && h < (e.from || 1) + e.sentences.length).length, 0);
+  return S.plan.lazy ? Math.max(1, Math.min(2, n)) : 0; // 사용성 테스트(lazy)는 근거 문장 필수(2개 이상)
+};
 const HINT_NAME = { 1: '1단계 · 관점', 2: '2단계 · 위치', 3: '3단계 · 구조' };
 const JOL_LABEL = { 0.125: '거의 못 떠올려요', 0.375: '일부만 떠올려요', 0.625: '대부분 떠올려요', 0.875: '거의 다 떠올려요' };
 const EXIT_REASONS = ['너무 어려워요', '시간이 없어요', '내용이 과제와 맞지 않아요', '기타'];
@@ -155,12 +163,18 @@ async function readPdf(file) {
   const lib = await loadPdfJs();
   const pdf = await lib.getDocument({ data: await file.arrayBuffer() }).promise;
   if (pdf.numPages > MAX_PAGES) throw { code: 'toolong' };
-  // 쪽마다 글자 조각의 위치(x, y)와 쪽 높이를 함께 모아 머리말·꼬리말·쪽번호를 걷어 낸다(pdfclean.mjs).
+  // 쪽마다 글자 조각의 위치(x, y)·크기·너비·글꼴과 그림이 그려진 영역을 모아, 머리말·쪽번호·각주·표·캡션을 걷어 내고 제목을 찾고 줄을 잇는다(pdfclean.mjs).
   const raw = [];
   for (let p = 1; p <= pdf.numPages; p++) {
     const page = await pdf.getPage(p);
     const tc = await page.getTextContent();
-    raw.push({ h: page.view[3] - page.view[1], items: tc.items.map((it) => ({ s: it.str, x: it.transform[4], y: it.transform[5], eol: !!it.hasEOL })) });
+    const w = page.view[2] - page.view[0], h = page.view[3] - page.view[1];
+    let images = [];
+    try { // 그림 영역을 못 구해도(오류) 글 추출은 계속한다
+      const ol = await page.getOperatorList();
+      images = imageRectsFromOps(ol.fnArray, ol.argsArray, lib.OPS, w, h);
+    } catch (_) { /* 그림 영역 없이 진행 */ }
+    raw.push({ h, images, items: tc.items.map((it) => ({ s: it.str, x: it.transform[4], y: it.transform[5], eol: !!it.hasEOL, h: it.height, w: it.width, font: it.fontName })) });
   }
   const sections = [];
   cleanPages(raw).forEach((t, i) => { if (t.trim().length > 20) sections.push({ sec: `${i + 1}쪽`, text: t }); });
@@ -171,26 +185,42 @@ async function readPdf(file) {
 
 // 자료를 나눠 올린다. 서버는 한 번에 청크 30개까지만 받는다. 청크는 약 400자이므로 6000자 배치는 청크 15개 안팎이다.
 const BATCH_CHARS = 6000; // 임베딩을 외부 API로 받으므로 서버 계산 부담이 작다. 여러 쪽을 한 번에 보내 왕복을 줄이고, 쪽 경계에서 청크가 끊기는 곳도 줄인다(청크 약 15개).
+// 아주 긴 쪽을 나눌 때 어절·제목 표시 한가운데서 자르지 않는다. 공백에서 자르고, 제목 표시가 열린 채면 그 앞에서 자른다.
+function splitLong(text, max = 4500) {
+  const out = [];
+  let rest = text;
+  while (rest.length > max) {
+    let cut = rest.lastIndexOf(' ', max);
+    if (cut < max * 0.5) cut = max;
+    const head = rest.slice(0, cut);
+    if (head.split(HEAD_OPEN).length > head.split(HEAD_CLOSE).length) { const at = head.lastIndexOf(HEAD_OPEN); if (at > 0) cut = at; }
+    out.push(rest.slice(0, cut));
+    rest = rest.slice(cut).trimStart();
+  }
+  if (rest) out.push(rest);
+  return out;
+}
 async function uploadSource(title, pdf) {
   const batches = [];
   let cur = [], len = 0;
   pdf.sections.forEach((s) => {
     if (cur.length && len + s.text.length > BATCH_CHARS) { batches.push(cur); cur = []; len = 0; }
     // 한 쪽이 아주 길면 쪽 하나를 여러 섹션으로 나눈다(청크 ID는 섹션 번호 기준이라 겹치지 않는다).
-    for (let k = 0; k < s.text.length; k += 4500) { cur.push({ sec: s.sec, text: s.text.slice(k, k + 4500) }); len += Math.min(4500, s.text.length - k); }
+    splitLong(s.text).forEach((part) => { cur.push({ sec: s.sec, text: part }); len += part.length; });
   });
   if (cur.length) batches.push(cur);
   // 빈 자료를 먼저 만들어 source_id를 확보한 뒤, 배치를 하나씩 이어 붙인다. 한 배치가 실패하면 그 배치만 다시 보낸다(서버는 같은 청크를 덮어쓴다).
   const created = await call('ingest-source', { title, lang: pdf.lang, pages: pdf.pages });
   const id = created.source_id;
-  let sent = 0, idx = 0;
+  let sent = 0, idx = 0, carry = '';
   for (let b = 0; b < batches.length; b++) {
     const msg = $('#layer .box2 div:last-child');
     if (msg) msg.textContent = `자료를 올리는 중이에요… ${b + 1}/${batches.length}`;
     let r, lastErr;
     for (let attempt = 0; attempt < 4 && !r; attempt++) {
       try {
-        r = await call('ingest-source', { source_id: id, sections: batches[b], section_offset: sent, idx_start: idx });
+        // carry: 앞 배치 끝에서 아직 끝나지 않은 문장. 서버가 이 배치 맨 앞에 붙인다("(김철수,"와 "2021)에서"가 갈라지지 않게). 마지막 배치는 남김없이 저장한다.
+        r = await call('ingest-source', { source_id: id, sections: batches[b], section_offset: sent, idx_start: idx, carry, last: b === batches.length - 1 });
       } catch (e) {
         lastErr = e;
         if (e.status && e.status < 500) throw e; // 요청 자체가 잘못된 경우는 다시 보내도 같다
@@ -198,7 +228,7 @@ async function uploadSource(title, pdf) {
       }
     }
     if (!r) throw lastErr;
-    idx = r.next_idx; sent += batches[b].length;
+    idx = r.next_idx; sent += batches[b].length; carry = r.carry || '';
   }
   return { id, title, pages: pdf.pages };
 }
@@ -252,17 +282,35 @@ function planScreen() {
   </section><aside class="scope"><div class="card"><h3>읽을 범위</h3>
     <div><span class="tag">PDF</span> ${esc(S.source.title)}</div>
     <div class="tags">${pages.map((p) => `<span class="tag">${esc(p)}</span>`).join('')}</div><hr>
-    <h3>과제 요구 항목</h3>${ms.map((m, i) => `<div class="req"><span>${esc(reqTitle(i))}</span><span class="tag">미션 ${i + 1}</span></div>`).join('')}
+    <h3>과제 요구 항목</h3>${ms.map((m, i) => `<div class="req"><span>${esc(reqTitle(i))}</span><span class="tag">${esc(REQ_TYPE_LABEL[m.req_type] || '')} · 미션 ${i + 1}</span></div>`).join('')}
     <hr><div class="hint-text">예상 시간 약 ${total}분</div></div></aside></div>`, { noSteps: true });
   $('#start').addEventListener('click', () => beginMission(0, S.plan.start_support));
   $('#redo').addEventListener('click', makePlan);
 }
 
 /* ---------- 3. 읽기 작업 ---------- */
-function beginMission(i, support) {
+async function beginMission(i, support) {
   S.mi = i; S.support = support; S.qtype = support.qtype;
   S.ui = { answer: '', evidence: [], hints: [], hintSents: [], fb: null, phase: 'answer', cue: support.sup >= 1, notice: '', reported: [], error: null, lastGap: '' };
+  const m = S.plan.missions[i];
+  if (S.plan.lazy && !m.variants.length) { // 질문은 미션을 시작할 때, 학생이 읽을 글을 보고 만든다
+    try {
+      const q = await withBusy('이번에 읽을 글에 맞춰 질문을 만드는 중이에요…', () => call('make-question', { session_id: S.plan.session_id, mission_idx: i }));
+      m.variants = [q.variant]; S.qtype = q.qtype; S.support = { ...support, ...(q.support || {}), qtype: q.qtype };
+    } catch (e) {
+      S.ui.error = e; S.ui.retryMake = true;
+      return questionFailScreen();
+    }
+  }
   workScreen();
+}
+// 질문을 만들지 못했을 때: 같은 미션을 다시 시도한다(진행 상태는 서버에 그대로 있다)
+function questionFailScreen() {
+  S.screen = 'work';
+  shell(`${S.source.title} · 미션`, `m${S.mi}`, `<div class="work"><section class="reader" id="reader"></section><aside class="helper">
+    <div class="head"><b>읽기 도우미</b><span class="tag">AI</span></div>${errBox(S.ui.error)}
+    <div class="bar"><span class="sp"></span><button class="btn primary" id="retryq" type="button">질문 다시 만들기</button></div></aside></div>`);
+  $('#retryq').addEventListener('click', () => beginMission(S.mi, S.support));
 }
 const variant = () => { const m = S.plan.missions[S.mi]; return m.variants.find((v) => v.qtype === S.qtype) || m.variants[0]; };
 
@@ -279,6 +327,8 @@ function readerHtml() {
   const core = m.excerpts.find((e) => e.role === 'core');
   return `<div class="src">원문 · ${esc(secLabel(core.sec))}</div>` + readerLayout().map(({ e, off }) => `<div class="para">${e.sentences.map((s, k) => {
     const n = off + k + 1;
+    // 제목 문장은 굵게 보여 주고 근거로 고를 수 없다(번호는 건너뛰지 않는다: 서버의 근거 번호와 맞아야 한다).
+    if ((e.heads || []).includes((e.from || 1) + k)) return `<div class="sent head" data-n="${n}"><span class="n">${n}</span><span class="t"><b>${esc(s)}</b></span></div>`;
     const cls = ['sent', S.ui.evidence.includes(n) ? 'picked' : '', S.ui.hintSents.includes(n) ? 'hinted' : ''].join(' ');
     return `<div class="${cls}" data-n="${n}" role="button" tabindex="0" aria-pressed="${S.ui.evidence.includes(n)}"><span class="n">${n}</span><span class="t">${esc(s)}</span>${S.ui.hintSents.includes(n) ? '<span class="tag">힌트</span>' : ''}</div>`;
   }).join('')}</div>`).join('');
@@ -291,7 +341,7 @@ function workScreen() {
   const hintsLeft = 3 - r.hint;
   const cite = u.evidence.length
     ? `<div class="cite">${u.evidence.map((n) => `<span class="tag">문장 ${n}</span>`).join('')}</div>`
-    : '<div class="hint-text">왼쪽 원문에서 문장을 눌러 근거로 추가해 보세요. (선택)</div>';
+    : `<div class="hint-text">왼쪽 원문에서 문장을 눌러 근거로 추가해 보세요. ${evidenceMin() ? `(필수 · ${evidenceMin()}개 이상)` : '(선택)'}</div>`;
   const fb = u.fb;
   let fbHtml = '';
   if (fb) {
@@ -314,7 +364,7 @@ function workScreen() {
     <aside class="helper" aria-label="읽기 도우미">
       <div class="head"><b>읽기 도우미</b><span class="tag">AI</span><span class="fill"></span><small>미션 ${S.mi + 1} / ${S.plan.missions.length}</small></div>
       ${u.cue ? `<div class="box"><b>읽기 전에 볼 점</b>${esc(v.cue)}</div>` : `<button class="link" id="cue" type="button">읽기 전에 볼 점 보기</button>`}
-      <div class="q"><small>질문 · ${QLABEL[S.qtype]}</small><p>${esc(v.question)}</p></div>
+      <div class="q"><small>질문 · ${S.plan.lazy ? LEVEL_LABEL[S.qtype] : QLABEL[S.qtype]}${S.plan.missions[S.mi].req_type ? ` · ${REQ_TYPE_LABEL[S.plan.missions[S.mi].req_type]}` : ''}</small><p>${esc(v.question)}</p></div>
       ${u.hints.map((h) => `<div class="feed"><span class="tag accent">AI 힌트</span> <span class="tag">${HINT_NAME[h.level]}</span><p style="margin:10px 0 0">${esc(h.text)}</p>${h.quote ? `<p style="margin:6px 0 0;color:var(--sub)">“${esc(h.quote)}” <span class="tag">${esc(h.location)}</span></p>` : ''}</div>`).join('')}
       ${answerBlock}${fbHtml}${reportChips}
       ${u.error ? errBox(u.error) : ''}
@@ -332,7 +382,7 @@ function workScreen() {
     u.evidence = u.evidence.includes(n) ? u.evidence.filter((x) => x !== n) : [...u.evidence, n].slice(-5).sort((a, b) => a - b);
     keep(); workScreen();
   };
-  document.querySelectorAll('.sent').forEach((el) => {
+  document.querySelectorAll('.sent:not(.head)').forEach((el) => {
     el.addEventListener('click', () => { if (u.phase === 'answer') pickSent(el); });
     el.addEventListener('keydown', (e) => { if ((e.key === 'Enter' || e.key === ' ') && u.phase === 'answer') { e.preventDefault(); pickSent(el); } });
   });
@@ -350,7 +400,8 @@ async function getHint() {
     const h = await withBusy('힌트를 만드는 중이에요…', () => call('submit-answer', { session_id: S.plan.session_id, mission_idx: S.mi, action: 'hint', qtype: S.qtype }));
     S.rec[S.mi].hint = h.hint_level;
     u.hints.push(h); u.error = null;
-    if (h.quote) { // 위치 힌트: 해당 문장을 원문에서 표시한다
+    if (h.sentences?.length) u.hintSents.push(...h.sentences); // 위치 힌트(읽은 글 전체 번호): 해당 문장을 원문에서 표시한다
+    else if (h.quote) {
       const lay = readerLayout().find((x) => x.e.role === 'core');
       lay.e.sentences.forEach((s, k) => { if (h.quote.includes(s)) u.hintSents.push(lay.off + k + 1); });
     }
@@ -361,6 +412,7 @@ async function getHint() {
 async function submitAnswer() {
   keep(); const u = S.ui;
   if (!u.answer.trim()) { u.error = { message: '답을 먼저 써 주세요.' }; return workScreen(); }
+  if (u.evidence.length < evidenceMin()) { u.error = { message: `근거 문장을 ${evidenceMin()}개 이상 골라 주세요. 왼쪽 원문에서 문장을 눌러 선택해요.` }; return workScreen(); }
   u.error = null; u.notice = '';
   try {
     const res = await withBusy('답을 확인하는 중이에요…', () => call('submit-answer', {

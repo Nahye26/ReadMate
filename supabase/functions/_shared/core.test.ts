@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert';
 import { createRequire } from 'node:module';
 import {
-  splitSentences, buildChunks, buildChunksFromSections, CHUNK_CONFIG, resolvePick, validateQuote, isCopy, cleanPlan, extractReqs, nextSupport, calibrate,
+  splitSentences, splitWithHeads, withholdTail, isNoiseSentence, HEAD_OPEN, HEAD_CLOSE, buildChunks, buildChunksFromSections, CHUNK_CONFIG, resolvePick, validateQuote, isCopy, cleanPlan, extractReqs, nextSupport, calibrate,
   summarize, EXPERIMENT_FLOW, DEFAULT_FLOW, contextIds, resolveExcerpts, estimateMins, normalizeAssignment,
   CONFIG, MAX_TEXT_UNITS, MAX_HINT, missionState, currentMission, answerOutcome, leaksKey, sentenceNums, pickQtype, supportBefore,
 } from './core.ts';
@@ -44,16 +44,71 @@ test('청킹: 문장 5~10개, 목표 700자에서 끊고, 짧은 꼬리는 이�
   assert.strictEqual(buildChunks(sent(3, 50), 's', 'e-')[0].s.length, 3);
 });
 
-test('문장 분리: 제목 번호(III. 1.)로 끝나는 짧은 조각은 뒤 문장과 합친다', () => {
-  const r = splitSentences('III. 연구 방법 1. 사례 선정 근거 본 연구에서는 사례를 선정하였다. 둘째 문장이다.');
-  assert.deepStrictEqual(r, ['III. 연구 방법 1. 사례 선정 근거 본 연구에서는 사례를 선정하였다.', '둘째 문장이다.']);
-  // 보통 문장은 그대로 자른다
-  assert.deepStrictEqual(splitSentences('첫 문장이다. 둘째 문장이다.'), ['첫 문장이다.', '둘째 문장이다.']);
-  // 숫자로 끝나도 긴 문장은 합치지 않는다
-  const long = '이 문장은 충분히 길어서 제목 번호가 아니라 일반 문장이며 마지막이 숫자 6.';
-  assert.strictEqual(splitSentences(long + ' 다음 문장이다.').length, 2);
-  // 맨 끝의 제목 번호 조각도 잃지 않는다
+test('문장 분리: 온점(. ? !) 뒤 공백에서만 자른다. 쉼표와 글자 수는 기준이 아니다', () => {
+  assert.deepStrictEqual(splitSentences('첫 문장이다. 둘째 문장이다? 셋째다!'), ['첫 문장이다.', '둘째 문장이다?', '셋째다!']);
+  // 인용 (김철수, 2021) 은 쉼표로 갈라지지 않는다
+  assert.deepStrictEqual(splitSentences('이는 선행연구(김철수, 2021)에서도 확인되었다. 다음 문장이다.'), ['이는 선행연구(김철수, 2021)에서도 확인되었다.', '다음 문장이다.']);
+  // 아주 짧은 문장도, 아주 긴 문장도 글자 수로 합치거나 쪼개지 않는다
+  assert.deepStrictEqual(splitSentences('네. 그렇다.'), ['네.', '그렇다.']);
+  const long = '가'.repeat(900) + '.';
+  assert.deepStrictEqual(splitSentences(long + ' 다음이다.'), [long, '다음이다.']);
+});
+
+test('문장 분리: 괄호·따옴표 안의 온점은 자르지 않는다', () => {
+  assert.deepStrictEqual(
+    splitSentences('다섯 가지(1. 비용 2. 시간 3. 접근성)로 정리된다. 다음 문장이다.'),
+    ['다섯 가지(1. 비용 2. 시간 3. 접근성)로 정리된다.', '다음 문장이다.'],
+  );
+  assert.deepStrictEqual(splitSentences('그는 “효과가 있다. 그러나 한계도 있다.”라고 했다. 끝이다.'), ['그는 “효과가 있다. 그러나 한계도 있다.”라고 했다.', '끝이다.']);
+  // 닫는 따옴표·괄호 바로 앞의 온점은 닫은 뒤 공백에서 자른다
+  assert.deepStrictEqual(splitSentences('그는 “그렇다.” 다음이다. (참고: 부록.) 끝이다.'), ['그는 “그렇다.”', '다음이다.', '(참고: 부록.)', '끝이다.']);
+  // 짝 없는 여는 괄호가 문서 끝까지 문장을 삼키지 않는다(400자 안전장치)
+  const out = splitSentences('시작(괄호가 안 닫힌다 ' + '가나다라.'.repeat(120) + ' 다음 문장이다. 또 다음이다.');
+  assert.ok(out.length > 1);
+});
+
+test('문장 분리: 영문 약어와 이니셜, 문장 맨 앞의 번호 토큰은 자르지 않는다', () => {
+  assert.deepStrictEqual(splitSentences('Smith et al. found the effect. 다음이다.'), ['Smith et al. found the effect.', '다음이다.']);
+  assert.deepStrictEqual(splitSentences('Kim et al. (2014)은 이를 보였다. 다음이다.'), ['Kim et al. (2014)은 이를 보였다.', '다음이다.']);
+  assert.deepStrictEqual(splitSentences('J. H. Smith는 이를 제안했다. 다음이다.'), ['J. H. Smith는 이를 제안했다.', '다음이다.']);
+  assert.deepStrictEqual(splitSentences('자세한 내용은 pp. 23-25를 보라. 다음이다.'), ['자세한 내용은 pp. 23-25를 보라.', '다음이다.']);
+  assert.deepStrictEqual(splitSentences('비타민 C. 다음 문장이다.'), ['비타민 C.', '다음 문장이다.']);
+  // 번호 토큰은 뒤 글과 붙는다(제목은 쪽 텍스트에서 따로 표시된다)
+  assert.deepStrictEqual(splitSentences('II. 이론적 배경 본 장에서는 개념을 살핀다. 다음이다.'), ['II. 이론적 배경 본 장에서는 개념을 살핀다.', '다음이다.']);
   assert.deepStrictEqual(splitSentences('본문이다. IV.'), ['본문이다.', 'IV.']);
+  assert.strictEqual(isNoiseSentence('IV.'), true); // 끝에 남은 번호 조각은 청킹에서 버린다
+});
+
+test('제목 표시: 제목은 본문과 합쳐지지 않는 독립 문장이고 heads에 번호가 남는다', () => {
+  const text = '앞 문장이다. ' + HEAD_OPEN + 'III. 연구 방법' + HEAD_CLOSE + ' 본 연구는 사례를 선정하였다. 두 번째 문장이다.';
+  assert.deepStrictEqual(splitWithHeads(text).map((x) => [x.t, x.head]), [
+    ['앞 문장이다.', false], ['III. 연구 방법', true], ['본 연구는 사례를 선정하였다.', false], ['두 번째 문장이다.', false],
+  ]);
+  const [c] = buildChunks(text, 's', 'h-');
+  assert.deepStrictEqual(c.heads, [2]);
+  assert.ok(!c.t.includes(HEAD_OPEN) && !c.t.includes(HEAD_CLOSE));
+  // 제목은 pick에서 빠진다
+  const plan = cleanPlan(
+    { reqs: ['a', 'b'], missions: [{ req: 1, picks: [{ chunk_id: 'h-1', from: 2, to: 3 }], variants: [{ qtype: 'literal', question: 'q?', key_points: ['k'] }] }] },
+    [c], { reqs: ['요구 하나 입니다', '요구 둘 입니다'] },
+  );
+  assert.deepStrictEqual(plan.missions[0].pick, ['h-1', 3, 3]);
+});
+
+test('배치 경계: 끝나지 않은 마지막 문장은 carry로 떼어 다음 배치에 붙인다', () => {
+  const a = withholdTail([{ sec: '3쪽', text: '앞 문장이다. 이는 선행연구(김철수,' }]);
+  assert.strictEqual(a.carry, '이는 선행연구(김철수,');
+  assert.deepStrictEqual(a.sections, [{ sec: '3쪽', text: '앞 문장이다.' }]);
+  // 다음 배치 맨 앞에 붙이면 인용이 한 문장으로 이어진다
+  const next = a.carry + ' ' + '2021)에서도 확인되었다. 다음이다.';
+  assert.deepStrictEqual(splitSentences(next), ['이는 선행연구(김철수, 2021)에서도 확인되었다.', '다음이다.']);
+  // 마침표로 끝났으면 떼지 않는다. 마침표 뒤 닫는 따옴표도 끝난 것으로 본다
+  assert.strictEqual(withholdTail([{ sec: '1쪽', text: '끝난 문장이다.' }]).carry, '');
+  assert.strictEqual(withholdTail([{ sec: '1쪽', text: '그는 “그렇다.”' }]).carry, '');
+  // 문장 하나가 통째로 꼬리면 그 구간이 비므로 섹션을 뺀다
+  assert.deepStrictEqual(withholdTail([{ sec: '1쪽', text: '아직 안 끝난' }]), { sections: [], carry: '아직 안 끝난' });
+  // 너무 긴 꼬리는 떼지 않는다
+  assert.strictEqual(withholdTail([{ sec: '1쪽', text: '가'.repeat(2000) }]).carry, '');
 });
 
 test('청킹: 쪽번호·구분선 같은 조각은 버린다', () => {
@@ -515,10 +570,11 @@ test('missionRecords → summarize: v0.5 로그 형식을 지킨다(실험 흐�
 
 test('근거 범위: 사용성 테스트(B)만 핵심 청크 전체, 효과성 검증은 고른 문장', async () => {
   const { basisFor, basisPick } = await import('./core.ts');
-  assert.strictEqual(basisFor(false, 'B'), 'chunk');
+  assert.strictEqual(basisFor(false, 'B'), 'mission');
   assert.strictEqual(basisFor(false, 'A'), 'excerpt');
   assert.strictEqual(basisFor(true, 'B'), 'excerpt'); // 실험 모드는 A/B가 같은 기준
   assert.deepStrictEqual(basisPick('chunk', ['p1-1', 2, 3], 3), ['p1-1', 1, 3]);
+  assert.deepStrictEqual(basisPick('mission', ['p1-1', 2, 3], 3), ['p1-1', 1, 3]);
   assert.deepStrictEqual(basisPick('excerpt', ['p1-1', 2, 3], 3), ['p1-1', 2, 3]);
   assert.deepStrictEqual(basisPick(undefined, ['p1-1', 2, 3], 3), ['p1-1', 2, 3]);
 });
@@ -538,4 +594,120 @@ test('connectState: 연결 단계 기록', async () => {
   assert.strictEqual(connectState([]), 'none');
   assert.strictEqual(connectState([{ mission_idx: null, kind: 'connect', payload: { stage: 'skip' } }]), 'skipped');
   assert.strictEqual(connectState([{ mission_idx: null, kind: 'connect', payload: { stage: 'answer' } }]), 'answered');
+});
+
+/* ---------- 요구 항목 유형과 질문 단계 (2026-11-23) ---------- */
+import { classifyReq, levelInfos, levelDepth, LEVEL_RANGE, buildWindow, windowNums, windowLocation, chunksTouched, minEvidence, evidenceFit } from './core.ts';
+
+const okAns = (m: number, extra: Record<string, unknown> = {}) => ans(m, { stage: 'first', outcome: 'passed', hints_before: 0, ...extra });
+const hard = (m: number) => [
+  { mission_idx: m, kind: 'hint', payload: { qtype: 'literal', level: 1 } },
+  { mission_idx: m, kind: 'hint', payload: { qtype: 'literal', level: 2 } },
+  ans(m, { stage: 'first', outcome: 'passed' }),
+];
+
+test('classifyReq: 의견 > 분석 > 정보 순으로 유형을 가른다', () => {
+  assert.strictEqual(classifyReq('연구의 한계를 비판적으로 평가하시오'), 'opinion');
+  assert.strictEqual(classifyReq('효과가 나타난 원인을 설명하시오'), 'analysis');
+  assert.strictEqual(classifyReq('연구 방법을 정리하시오'), 'info');
+});
+
+test('levelInfos: LLM 값이 올바르면 쓰고, 아니면 문장에서 가른다', () => {
+  const lv = levelInfos([{ req: 1 }, { req: 2 }, { req: 3 }], ['방법을 정리', '원인 설명', '견해를 쓰시오'], ['opinion', 'x']);
+  assert.deepStrictEqual(lv.map((l) => l.type), ['opinion', 'analysis', 'opinion']);
+});
+
+test('levelDepth: 유형별 시작 단계(정보 1단계 / 분석·의견 2단계)', () => {
+  const mk = (type: any) => [{ req: 1, type }, { req: 1, type }]; // 같은 항목의 첫 미션
+  assert.strictEqual(levelDepth([], 0, mk('info')), 0);
+  assert.strictEqual(levelDepth([], 0, mk('analysis')), 1);
+  assert.strictEqual(levelDepth([], 0, mk('opinion')), 1);
+});
+
+test('levelDepth: 미션 사이에서만 움직이고 유형 범위를 넘지 않는다', () => {
+  const lv = [{ req: 1, type: 'info' as const }, { req: 1, type: 'info' as const }, { req: 1, type: 'info' as const }];
+  // 정보형: 도움 없이 통과하면 올라가지만 상한은 2단계(depth 1)
+  assert.strictEqual(levelDepth([okAns(0)], 1, lv), 1);
+  assert.strictEqual(levelDepth([okAns(0), okAns(1)], 2, lv), 1);
+  // 힌트 2단계로 통과하면 내려간다(바닥은 1단계)
+  assert.strictEqual(levelDepth([...hard(0)], 1, lv), 0);
+  // 같은 미션 안에서는 바뀌지 않는다: 현재 미션 기록은 단계에 영향이 없다
+  assert.strictEqual(levelDepth([okAns(0), { mission_idx: 1, kind: 'hint', payload: { qtype: 'literal', level: 1 } }], 1, lv), 1);
+});
+
+test('levelDepth: 새 요구 항목은 그 유형의 시작 단계로 다시 시작하고, 마지막 미션은 최소 추론', () => {
+  const lv = [{ req: 1, type: 'info' as const }, { req: 2, type: 'analysis' as const }, { req: 3, type: 'info' as const }];
+  assert.strictEqual(levelDepth([okAns(0)], 1, lv), 2); // 분석 시작(1) + 통과(+1)
+  assert.strictEqual(levelDepth([okAns(0), okAns(1)], 2, lv), 1); // 정보 시작 0 + 통과(+1), 마지막이라 최소 1
+  assert.strictEqual(levelDepth([...hard(0)], 2, [{ req: 1, type: 'info' }, { req: 2, type: 'info' }, { req: 3, type: 'info' }]), 1); // 마지막 미션 하한
+});
+
+test('levelDepth: 의견형 항목의 마지막 미션은 힘들어하지 않았다면 3단계', () => {
+  const lv = [{ req: 1, type: 'opinion' as const }, { req: 1, type: 'opinion' as const }, { req: 2, type: 'info' as const }];
+  assert.strictEqual(levelDepth([okAns(0)], 1, lv), 2);
+  assert.strictEqual(levelDepth([...hard(0)], 1, lv), 0); // 힘들어하면 올리지 않는다(내려감)
+  assert.strictEqual(LEVEL_RANGE.info.max, 1);
+});
+
+test('levelDepth: 적응을 끄면(실험 모드) 유형 시작 단계에서 바뀌지 않는다', () => {
+  const lv = [{ req: 1, type: 'analysis' as const }, { req: 1, type: 'analysis' as const }];
+  assert.strictEqual(levelDepth([okAns(0)], 1, lv, false), 1);
+});
+
+test('supportBefore: levels를 주면 깊이를 요구 항목 유형으로 계산한다', () => {
+  const lv = [{ req: 1, type: 'analysis' as const }];
+  assert.strictEqual(supportBefore([], 0, DEFAULT_FLOW, lv).depth, 1);
+  assert.strictEqual(supportBefore([], 0, DEFAULT_FLOW).depth, 0); // 없으면 예전 방식
+});
+
+test('읽은 글(Win): 앞·핵심·뒤 청크에 이어 번호를 붙이고 제목은 근거로 못 고른다', () => {
+  const w = buildWindow([
+    { id: 'a', sec: '1쪽', s: ['제목.', '가 문장.', '나 문장.'], t: '', heads: [1] },
+    { id: 'b', sec: '1쪽', s: ['다 문장.', '라 문장.'], t: '' },
+  ]);
+  assert.deepStrictEqual(w.spans.map((x) => [x.from, x.to]), [[1, 3], [4, 5]]);
+  assert.deepStrictEqual(w.heads, [1]);
+  assert.deepStrictEqual(windowNums([5, 1, 2, 2, 9, 'x'], w), [2, 5]);
+  assert.strictEqual(chunksTouched(w, [2, 3]), 1);
+  assert.strictEqual(chunksTouched(w, [3, 4]), 2);
+  assert.match(windowLocation(w, [3, 4]), /문장 3.*\/.*문장 4/);
+  assert.strictEqual(minEvidence(w), 2);
+  assert.strictEqual(minEvidence(buildWindow([{ id: 'a', sec: 's', s: ['하나.'], t: '' }])), 1);
+});
+
+test('evidenceFit: 기준 근거와의 겹침으로 good/partial/off', () => {
+  const ev = [[2, 3], [5]];
+  assert.strictEqual(evidenceFit([2, 3, 5], ev), 'good');
+  assert.strictEqual(evidenceFit([2, 8, 9], ev), 'partial');
+  assert.strictEqual(evidenceFit([7, 8], ev), 'off');
+  assert.strictEqual(evidenceFit([2], undefined), null); // 기준 번호가 없으면 모델 판단에 맡긴다
+});
+
+test('answerOutcome: pass라도 근거가 어긋난 첫 답은 보완, 보완 뒤에는 통과', () => {
+  assert.strictEqual(answerOutcome(0, 'pass', 'off'), 'revise');
+  assert.strictEqual(answerOutcome(1, 'pass', 'off'), 'passed');
+  assert.strictEqual(answerOutcome(0, 'pass', 'partial'), 'passed');
+  assert.strictEqual(answerOutcome(0, 'pass'), 'passed');
+  assert.strictEqual(answerOutcome(1, 'partial', 'good'), 'unresolved');
+});
+
+test('cleanPlan(lazy): 질문 없이 읽을 곳과 요구 유형만 담는다', () => {
+  const chunks = [{ id: 'p1-1', sec: '1쪽', s: ['가.', '나.', '다.'], t: '가. 나. 다.' }];
+  const plan = cleanPlan(
+    { reqs: ['방법을 정리하시오', '한계를 비판하시오'], req_types: ['info', 'opinion'], missions: [{ req: 1, picks: [{ chunk_id: 'p1-1', from: 1, to: 2 }] }, { req: 2, picks: [{ chunk_id: 'p1-1', from: 2, to: 3 }] }] },
+    chunks, { lazy: true },
+  );
+  assert.strictEqual(plan.missions.length, 2);
+  assert.deepStrictEqual(plan.reqTypes, ['info', 'opinion']);
+  assert.strictEqual(plan.lazy, true);
+  assert.deepStrictEqual(plan.missions[0].vars, []);
+});
+
+test('summarize: 요구 유형·질문 단계·근거 적합도·종합 청크 수를 미션별로 남긴다', () => {
+  const t = [ans(0, { stage: 'first', qtype: 'inferential', outcome: 'passed', evidence_fit: 'good', chunks_used: 2, evidence: [1, 4] })];
+  const lv = [{ req: 1, type: 'analysis' as const }];
+  const r = missionRecords(t, [{ idx: 0, req: 1, context_ids: ['a', 'b'] }], DEFAULT_FLOW, 'B', lv);
+  assert.strictEqual(r.records[0].reqType, 'analysis');
+  assert.strictEqual(r.records[0].evidenceFit, 'good');
+  assert.strictEqual(r.records[0].chunksUsed, 2);
 });

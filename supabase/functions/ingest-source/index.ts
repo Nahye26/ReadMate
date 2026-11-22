@@ -1,13 +1,16 @@
 // POST /ingest-source
-// 입력: { title, lang?, pages?, sections: [{ sec, text }], source_id?, section_offset?, idx_start? }  — PDF 텍스트 추출은 데모처럼 브라우저(pdf.js)에서 한다.
+// 입력: { title, lang?, pages?, sections: [{ sec, text }], source_id?, section_offset?, idx_start?, carry?, last? }  — PDF 텍스트 추출은 데모처럼 브라우저(pdf.js)에서 한다.
 // 한 번의 호출은 요청 크기와 시간 때문에 작게(청크 MAX_CHUNKS_PER_CALL개 이하) 유지한다. 긴 자료는 클라이언트가 나눠 보낸다.
 //   첫 호출: source_id 없이 sections도 없이 title만 보낸다 → 빈 자료를 만들고 source_id를 돌려준다. (플랫폼이 계산 한도로 호출을 끊어도 source_id를 잃지 않게 하려고 분리했다)
 //   이어 보내기: 첫 호출이 돌려준 source_id와, 이미 보낸 섹션 수(section_offset), 이미 저장된 청크 수(idx_start)를 함께 보낸다.
 //   section_offset은 청크 ID(p{섹션번호}-k)가 겹치지 않게, idx_start는 chunks.idx(앞뒤 청크 순서)가 이어지게 한다.
+//   carry / last: 배치 경계에서 문장이 끊기지 않게 한다. last가 false이면 이번 배치의 끝나지 않은 마지막 문장(마침표 없음, 괄호가 열린 채)을 청킹에서 빼고 carry로 돌려준다.
+//   클라이언트는 그 carry를 다음 호출의 carry로 보내고, 서버가 다음 배치 맨 앞에 붙인다. 마지막 배치는 last = true(생략하면 true)로 보내 남김없이 저장한다.
+//   텍스트 안의 제목 표시(core.ts HEAD_OPEN/HEAD_CLOSE)는 독립 문장으로 나뉘고 chunks.heads(제목 문장 번호)에 남는다.
 // 동작: 문단 단위로 청킹 → 청크 임베딩(Gemini API 배치 호출) → sources / chunks 저장
 // 출력: { source_id, chunks, next_idx }   (chunks: 이번 호출에서 저장한 수, next_idx: 다음 호출의 idx_start)
 // 같은 호출을 다시 보내도 안전하다(같은 청크 ID는 덮어쓴다). 클라이언트는 실패한 배치만 다시 보낸다.
-import { buildChunksFromSections, type Chunk } from '../_shared/core.ts';
+import { buildChunksFromSections, prependCarry, withholdTail, type Chunk } from '../_shared/core.ts';
 import { EmbedError, embedMany, toVector } from '../_shared/embed.ts';
 import { authedUser, corsHeaders, json, serviceClient } from '../_shared/http.ts';
 
@@ -36,13 +39,17 @@ Deno.serve(async (req) => {
   if (!create && (!Array.isArray(sections) || !sections.length)) return json({ error: 'bad_request', message: 'sections가 필요합니다' }, 400);
   if (!append && (typeof title !== 'string' || !title.trim())) return json({ error: 'bad_request', message: 'title이 필요합니다' }, 400);
 
-  const chunks: Chunk[] = create
+  const carryIn = typeof body?.carry === 'string' ? body.carry.slice(0, 2000) : '';
+  const last = body?.last !== false; // 생략하면 마지막 배치로 본다(이월 없이 남김없이 저장)
+  let secs: { sec: string; text: string }[] = create
     ? []
-    : buildChunksFromSections(
-        sections.map((s: any, i: number) => ({ sec: String(s?.sec ?? `본문 ${sectionOffset + i + 1}`), text: String(s?.text ?? '') })),
-        sectionOffset,
-      );
+    : sections.map((s: any, i: number) => ({ sec: String(s?.sec ?? `본문 ${sectionOffset + i + 1}`), text: String(s?.text ?? '') }));
+  if (carryIn && secs.length) secs[0] = { ...secs[0], text: prependCarry(carryIn, secs[0].text) };
+  let carryOut = '';
+  if (!last && secs.length) ({ sections: secs, carry: carryOut } = withholdTail(secs));
+  const chunks: Chunk[] = secs.length ? buildChunksFromSections(secs, sectionOffset) : [];
   const chars = chunks.reduce((n, c) => n + c.t.length, 0);
+  if (!create && !chunks.length && carryOut) return json({ source_id: body.source_id, chunks: 0, next_idx: idxStart, carry: carryOut });
   if (!create && !chunks.length) return json({ error: 'empty_text' }, 400);
   if (chunks.length > MAX_CHUNKS_PER_CALL) {
     return json({ error: 'batch_too_large', message: `한 번에 청크 ${MAX_CHUNKS_PER_CALL}개까지 보낼 수 있습니다(받은 수 ${chunks.length})` }, 413);
@@ -80,9 +87,15 @@ Deno.serve(async (req) => {
     // 임베딩은 Gemini API 한 번(배치)으로 받는다. 서버 CPU를 거의 쓰지 않는다.
     if (todo.length) {
       const vecs = await embedMany(todo.map((c) => c.t), 'RETRIEVAL_DOCUMENT');
-      const rows = todo.map((c, i) => ({ source_id: sourceId, id: c.id, idx: idxStart + chunks.indexOf(c), sec: c.sec, sentences: c.s, text: c.t, embedding: toVector(vecs[i]) }));
+      const rows = todo.map((c, i) => ({ source_id: sourceId, id: c.id, idx: idxStart + chunks.indexOf(c), sec: c.sec, sentences: c.s, heads: c.heads ?? [], text: c.t, embedding: toVector(vecs[i]) }));
       for (let i = 0; i < rows.length; i += 100) {
-        const { error } = await db.from('chunks').upsert(rows.slice(i, i + 100), { onConflict: 'source_id,id' });
+        let batch: Record<string, unknown>[] = rows.slice(i, i + 100);
+        let { error } = await db.from('chunks').upsert(batch, { onConflict: 'source_id,id' });
+        // heads 컬럼 migration(20261123000000)이 아직 적용되지 않았으면 제목 정보 없이 저장한다(제목이 굵게 보이지 않을 뿐 동작은 같다).
+        if (error && /heads/.test(error.message)) {
+          batch = batch.map(({ heads: _h, ...rest }) => rest);
+          ({ error } = await db.from('chunks').upsert(batch, { onConflict: 'source_id,id' }));
+        }
         if (error) throw new Error(error.message);
       }
     }
@@ -92,5 +105,5 @@ Deno.serve(async (req) => {
     return json({ error: 'ingest_failed', message: (e as Error).message }, 500);
   }
 
-  return json({ source_id: sourceId, chunks: chunks.length, next_idx: idxStart + chunks.length });
+  return json({ source_id: sourceId, chunks: chunks.length, next_idx: idxStart + chunks.length, carry: carryOut });
 });

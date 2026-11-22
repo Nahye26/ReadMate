@@ -15,6 +15,7 @@ import { authedUser, corsHeaders, json, serviceClient } from '../_shared/http.ts
 import { askJson, LlmError } from '../_shared/llm.ts';
 import { buildRecallPrompt } from '../_shared/prompts.ts';
 import { basisPick, type Basis, type Pick, type QType } from '../_shared/core.ts';
+import { loadWindow } from '../_shared/window.ts';
 
 const MAX_ANSWER_CHARS = 3000;
 const ACTIONS = ['start', 'predict', 'submit', 'skip'];
@@ -60,7 +61,7 @@ Deno.serve(async (req) => {
   if (!ses.source_id) return json({ error: 'source_missing', message: '세션의 읽기 자료가 삭제되었습니다' }, 500);
 
   const [{ data: missions }, { data: turns }] = await Promise.all([
-    db.from('missions').select('idx, variants, picks').eq('session_id', session_id).order('idx'),
+    db.from('missions').select('idx, variants, picks, context_ids').eq('session_id', session_id).order('idx'),
     db.from('turns').select('mission_idx, kind, payload').eq('session_id', session_id).order('id'),
   ]);
   const history = turns ?? [];
@@ -128,7 +129,14 @@ Deno.serve(async (req) => {
   const basis = ((ses.config as { basis?: Basis } | null)?.basis) ?? 'excerpt';
   const items = [];
   for (const g of groups) {
-    const picked = (missions!.find((m) => m.idx === g.m)!.picks as Pick[])[0];
+    const mrow = missions!.find((m) => m.idx === g.m)!;
+    if ((ses.config as { lazy?: boolean } | null)?.lazy) { // 질문이 읽은 글 전체를 근거로 하므로 채점 보조 텍스트도 읽은 글 전체다
+      const loaded = await loadWindow(db, ses.source_id, (mrow.context_ids as string[]) ?? [(mrow.picks as Pick[])[0][0]]);
+      if (!loaded) return json({ error: 'chunk_missing' }, 500);
+      items.push({ question: g.question, keys: g.keys, core: { sentences: loaded.win.sentences, from: 1 } });
+      continue;
+    }
+    const picked = (mrow.picks as Pick[])[0];
     const { data: row } = await db.from('chunks').select('sentences').eq('source_id', ses.source_id).eq('id', picked[0]).maybeSingle();
     if (!row) return json({ error: 'chunk_missing' }, 500);
     const s = row.sentences as string[];
