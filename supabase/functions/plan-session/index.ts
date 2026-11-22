@@ -20,18 +20,26 @@ const TOP_K = CONFIG.topK;
 const PROMPT_VERSION = 'v0.5-chat'; // 로그 스키마 버전 (eval/ 과 동일)
 
 type Db = ReturnType<typeof serviceClient>;
-type Row = { id: string; idx: number; sec: string; sentences: string[] };
+type Row = { id: string; idx: number; sec: string; sentences: string[]; heads?: number[] };
 class PlanError extends Error {
   constructor(public status: number, public code: string, message = '') {
     super(message || code);
   }
 }
 
+// 제목 문장 번호(heads) 컬럼이 아직 없는 DB(migration 20261123000000 적용 전)에서도 동작하도록, 컬럼 오류면 heads 없이 다시 조회한다.
+// deno-lint-ignore no-explicit-any
+async function selectChunks(_db: Db, run: (cols: string) => any): Promise<{ data: any[] | null; error: { message: string } | null }> {
+  const first = await run('id, idx, sec, sentences, heads');
+  if (first.error && /heads/.test(first.error.message)) return await run('id, idx, sec, sentences');
+  return first;
+}
+
 const sha256 = async (s: string) =>
   [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)))]
     .map((b) => b.toString(16).padStart(2, '0')).join('');
 
-const toChunk = (r: Row): Chunk => ({ id: r.id, sec: r.sec, s: r.sentences, t: r.sentences.join(' ') });
+const toChunk = (r: Row): Chunk => ({ id: r.id, sec: r.sec, s: r.sentences, t: r.sentences.join(' '), ...(r.heads?.length ? { heads: r.heads } : {}) });
 
 // 질문 세트를 만든다. fixed(효과성 검증)면 저장된 세트를 우선 쓰고 없으면 만들어 저장한다. 아니면 매번 새로 만들고 저장하지 않는다.
 async function questionSetFor(
@@ -170,8 +178,7 @@ Deno.serve(async (req) => {
 
   // 2) 제공 청크: 핵심 청크는 항상, 조건 B는 같은 절의 앞뒤 청크를 더한다.
   const coreIds = [...new Set(plan.missions.map((m) => m.pick[0]))];
-  const { data: coreRows, error: coreErr } = await db
-    .from('chunks').select('id, idx, sec, sentences').eq('source_id', source_id).in('id', coreIds);
+  const { data: coreRows, error: coreErr } = await selectChunks(db, (cols) => db.from('chunks').select(cols).eq('source_id', source_id).in('id', coreIds));
   if (coreErr || (coreRows ?? []).length !== coreIds.length) {
     return json({ error: 'chunk_missing', message: coreErr?.message ?? '질문 세트의 핵심 청크를 찾지 못했습니다' }, 500);
   }
@@ -182,8 +189,7 @@ Deno.serve(async (req) => {
     const near = new Set<number>();
     rows.forEach((r) => [r.idx - 1, r.idx + 1].forEach((n) => n >= 0 && !have.has(n) && near.add(n)));
     if (near.size) {
-      const { data: extra, error: exErr } = await db
-        .from('chunks').select('id, idx, sec, sentences').eq('source_id', source_id).in('idx', [...near]);
+      const { data: extra, error: exErr } = await selectChunks(db, (cols) => db.from('chunks').select(cols).eq('source_id', source_id).in('idx', [...near]));
       if (exErr) return json({ error: 'db_error', message: exErr.message }, 500);
       rows = rows.concat((extra ?? []) as Row[]);
     }

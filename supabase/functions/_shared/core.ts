@@ -2,7 +2,8 @@
 // index.html 데모(v0.4)의 로직을 클라이언트에서 서버로 옮긴 것이다. Edge Function과 Node 테스트에서 같이 쓴다.
 // 이식 대상: split / buildChunks / resolve / validateQuote / isCopy / cleanPlan / fadeAfter / 보정 판정
 
-export type Chunk = { id: string; sec: string; s: string[]; t: string };
+// heads: 제목인 문장의 번호(1부터). 제목은 독립 문장이지만 핵심 발췌와 질문 대상에서는 빼고, 화면에서 굵게 보여 준다.
+export type Chunk = { id: string; sec: string; s: string[]; t: string; heads?: number[] };
 export type Pick = [chunkId: string, from: number, to: number];
 // 질문·판정·힌트·인출이 근거로 삼는 범위. excerpt: 고른 1~3문장만(A 기준, 효과성 검증). chunk: 고른 문장이 속한 핵심 청크 전체(조건 B, 사용성 테스트).
 // 앞뒤 청크는 어느 쪽이든 근거 범위가 아니다(context_used 판단에만 쓴다).
@@ -40,23 +41,107 @@ export const MAX_TEXT_UNITS = 1 + CONFIG.ctxBefore + CONFIG.ctxAfter; // 미션�
 
 /* ---------- 청킹 ---------- */
 
-// 문장 끝(. ! ? 。) 뒤 공백에서 자른다. 단, "III." "1." "2)"처럼 제목 번호로 끝나는 짧은 조각(40자 이하)은 문장이 아니므로
-// 뒤 조각과 합친다("III. 연구 방법 1. 사례 선정 근거 본 연구에서는 …"가 한 문장이 된다).
-const HEADING_NUM = /(?:^|\s)(?:[IVXivx]{1,5}|\d{1,2})\.$/;
+// 문장은 온점(. ! ? 。) 뒤 공백에서만 자른다(2026-11-22 확정). 쉼표는 기준이 아니고 한 문장의 글자 수도 보지 않는다.
+// 자르지 않는 경우:
+//   1) 괄호·따옴표가 열려 있는 동안: "다섯 가지(1. 비용 2. 시간)", "(김철수 외. 2021)". 짝이 안 맞아 문서 끝까지 열려 버리는 일을 막으려고
+//      열린 지 OPEN_SPAN_MAX자가 지나면 짝이 없는 것으로 보고 닫는다(글자 수로 문장을 가르는 기준이 아니라 안전장치다).
+//   2) 영문 약어 뒤(et al. / Fig. / pp. / vs. …)와 이니셜 뒤("J. H. Smith")
+//   3) 문장 맨 앞의 번호 토큰 뒤("II." "3." "가."): 제목 번호는 뒤 글과 붙여 둔다. 제목은 PDF 쪽에서 굵기·크기로 따로 표시한다(HEAD_OPEN/HEAD_CLOSE).
+const OPEN_CH = '([{（［〔〈《「『“‘';
+const CLOSE_CH = ')]}）］〕〉》」』”’';
+const OPEN_SPAN_MAX = 400;
+const ABBR = new Set(['fig', 'figs', 'eq', 'eqs', 'no', 'nos', 'vs', 'pp', 'p', 'vol', 'vols', 'ed', 'eds', 'dr', 'prof', 'mr', 'mrs', 'ms', 'cf', 'e.g', 'i.e', 'ca', 'approx', 'jr', 'sr', 'st', 'inc', 'ltd', 'co', 'univ', 'ch', 'sec']);
+const NUM_TOKEN = /^(?:[IVXivx]{1,5}|\d{1,3}|[가나다라마바사아자차카타파하])\.$/;
+
+export const HEAD_OPEN = '\uE000'; // 쪽 텍스트 안에서 제목을 감싸는 표시(사설 영역 문자). 서버가 읽고 지운다.
+export const HEAD_CLOSE = '\uE001';
+export const JOIN_MARK = '\uE002'; // 쪽 텍스트 맨 앞에 있으면 앞 쪽과 공백 없이 이어 붙인다(쪽 경계에서 어절이 끊긴 경우). web/pdfclean.mjs의 JOIN과 같은 값이다.
+const MARKS = /[\uE000-\uE002]/g;
+
 export function splitSentences(t: string): string[] {
-  const parts = t.split(/(?<=[.!?。])\s+/).filter(Boolean);
   const out: string[] = [];
-  let carry = '';
-  for (const p of parts) {
-    const cur = carry ? carry + ' ' + p : p;
-    if (cur.length <= 40 && HEADING_NUM.test(cur)) carry = cur;
-    else {
-      out.push(cur);
-      carry = '';
+  let depth = 0;
+  let openedAt = 0;
+  let start = 0;
+  for (let i = 0; i < t.length; i++) {
+    const c = t[i];
+    if (OPEN_CH.includes(c)) {
+      if (depth === 0) openedAt = i;
+      depth++;
+    } else if (CLOSE_CH.includes(c) && depth > 0) depth--;
+    if (depth > 0 && i - openedAt > OPEN_SPAN_MAX) depth = 0;
+    if (!/\s/.test(c) || (i > 0 && /\s/.test(t[i - 1]))) continue; // 공백 덩어리의 첫 칸에서만 본다
+    let j = i - 1;
+    while (j >= start && CLOSE_CH.includes(t[j])) j--;
+    const term = t[j];
+    if (depth > 0 || j < start || !'.!?。'.includes(term ?? '')) continue;
+    if (term === '.') {
+      const tok = t.slice(start, j + 1).split(/\s+/).pop()!.replace(/^[(\[{“‘"']+/, '');
+      const word = tok.slice(0, -1);
+      const rest = t.slice(i).trimStart();
+      const next = rest[0] ?? '';
+      if (NUM_TOKEN.test(t.slice(start, j + 1).trim().replace(/^[\uE000\uE001]+/, ''))) continue; // 문장 맨 앞 번호
+      const lower = word.toLowerCase();
+      if (lower === 'al') {
+        if (/[a-z(\d]/.test(next)) continue; // et al. suggested / et al. (2014)
+      } else if (ABBR.has(lower)) continue;
+      else if (/^[A-Za-z]$/.test(word) && /[A-Z]/.test(next)) continue; // 이니셜: J. H. Smith
+      else if (/^[A-Za-z]{2,}$/.test(word) && /[a-z]/.test(next)) continue; // 영어 단어 뒤 소문자: 약어로 본다
     }
+    out.push(t.slice(start, i).trim());
+    start = i + 1;
   }
-  if (carry) out.push(carry);
+  const tail = t.slice(start).trim();
+  if (tail) out.push(tail);
+  return out.filter(Boolean);
+}
+
+// 괄호·따옴표가 열린 채 끝나는지(짝이 안 맞는 꼬리인지) 본다.
+export function bracketDepth(t: string): number {
+  let depth = 0;
+  for (const c of t) {
+    if (OPEN_CH.includes(c)) depth++;
+    else if (CLOSE_CH.includes(c) && depth > 0) depth--;
+  }
+  return depth;
+}
+
+// 제목 표시(HEAD_OPEN…HEAD_CLOSE)가 있는 글을 문장 목록으로 만든다. 제목은 앞뒤 본문과 한 문장으로 합쳐지지 않는 독립 문장이다.
+export function splitWithHeads(text: string): { t: string; head: boolean }[] {
+  const out: { t: string; head: boolean }[] = [];
+  const re = new RegExp(`${HEAD_OPEN}([^${HEAD_CLOSE}]*)${HEAD_CLOSE}`, 'g');
+  let pos = 0;
+  const body = (x: string) => splitSentences(x.replace(MARKS, '')).forEach((t) => out.push({ t, head: false }));
+  for (const m of text.matchAll(re)) {
+    body(text.slice(pos, m.index));
+    const h = m[1].replace(/\s+/g, ' ').trim();
+    if (h) out.push({ t: h, head: true });
+    pos = m.index! + m[0].length;
+  }
+  body(text.slice(pos));
   return out;
+}
+
+// carry를 다음 배치 첫 섹션 맨 앞에 붙인다. 그 섹션이 JOIN_MARK로 시작하면 공백 없이 붙인다.
+export function prependCarry(carry: string, text: string): string {
+  if (!carry) return text;
+  return text.startsWith(JOIN_MARK) ? carry + text.slice(1) : carry + ' ' + text;
+}
+
+// 업로드 배치 경계에서 문장이 끊기지 않게, 마지막 문장이 끝나지 않았으면(마침표가 없거나 괄호가 열린 채) 떼어 carry로 돌려준다.
+// 클라이언트가 carry를 다음 배치 맨 앞에 붙여 보낸다("(김철수," 와 "2021)에서…"가 갈라지는 일을 막는다). 꼬리가 maxCarry보다 길면 떼지 않는다.
+export function withholdTail(sections: { sec: string; text: string }[], maxCarry = 1500): { sections: { sec: string; text: string }[]; carry: string } {
+  if (!sections.length) return { sections, carry: '' };
+  const last = sections[sections.length - 1];
+  const text = last.text.replace(/\s+$/, '');
+  const cut = text.lastIndexOf(HEAD_CLOSE) + 1; // 제목 표시 뒤쪽만 본다
+  const area = text.slice(cut);
+  const parts = splitSentences(area);
+  const tail = parts[parts.length - 1] ?? '';
+  const complete = /[.!?。][)\]}）］〕〉》」』”’]*$/.test(tail) && bracketDepth(tail) === 0;
+  if (!tail || complete || tail.length > maxCarry || parts.length === 0) return { sections, carry: '' };
+  const body = text.slice(0, cut + area.lastIndexOf(tail)).trimEnd();
+  return { sections: body ? [...sections.slice(0, -1), { sec: last.sec, text: body }] : sections.slice(0, -1), carry: tail };
 }
 
 // 청크 크기 (2026-11-18): 한국어 학술문은 3문장·300자 단위로 자르면 청크가 평균 160자로 너무 짧아(조건 B 발췌 약 490자) 읽기가 부족했다.
@@ -70,9 +155,9 @@ export const CHUNK_CONFIG = {
 };
 
 // 쪽번호·구분선·한두 글자 조각처럼 읽을 내용이 없는 문장
-export const isNoiseSentence = (s: string) => s.trim().length < 3 || /^[\d\s.,\-–—~·|━─=*]+$/.test(s.trim());
+export const isNoiseSentence = (s: string) => s.trim().length < 3 || /^[\d\s.,\-–—~·|━─=*]+$/.test(s.trim()) || NUM_TOKEN.test(s.trim());
 
-type Sent = { t: string; page?: number };
+type Sent = { t: string; page?: number; head?: boolean };
 
 function packSentences(sents: Sent[], sec: (first: Sent, last: Sent) => string, prefix: string): Chunk[] {
   const { minSent, maxSent, targetChars, minChars } = CHUNK_CONFIG;
@@ -106,12 +191,15 @@ function packSentences(sents: Sent[], sec: (first: Sent, last: Sent) => string, 
     else merged.push(g);
   }
   if (merged.length > 1 && short(merged[0])) merged.splice(0, 2, ...join(merged[0], merged[1]));
-  return merged.map((g, i) => ({ id: prefix + (i + 1), sec: sec(g[0], g[g.length - 1]), s: g.map((x) => x.t), t: g.map((x) => x.t).join(' ') }));
+  return merged.map((g, i) => {
+    const heads = g.flatMap((x, k) => (x.head ? [k + 1] : []));
+    return { id: prefix + (i + 1), sec: sec(g[0], g[g.length - 1]), s: g.map((x) => x.t), t: g.map((x) => x.t).join(' '), ...(heads.length ? { heads } : {}) };
+  });
 }
 
 export function buildChunks(text: string, sec: string, prefix: string): Chunk[] {
-  const sents = splitSentences(text.replace(/\s+/g, ' ').trim()).filter((t) => !isNoiseSentence(t));
-  return packSentences(sents.map((t) => ({ t })), () => sec, prefix);
+  const sents = splitWithHeads(text.replace(/\s+/g, ' ').trim()).filter((x) => !isNoiseSentence(x.t));
+  return packSentences(sents, () => sec, prefix);
 }
 
 // 쪽 번호 구간 레이블("3쪽", "3–4쪽")에서 쪽 범위를 읽는다.
@@ -141,19 +229,20 @@ export function buildChunksFromSections(sections: { sec: string; text: string }[
     let joined = '';
     const starts: { at: number; n: number }[] = [];
     pages.forEach((pg) => {
-      if (joined) joined += ' ';
+      const glue = pg.text.startsWith(JOIN_MARK); // 쪽 경계에서 어절이 끊겼으면 공백 없이 잇는다
+      if (joined && !glue) joined += ' ';
       starts.push({ at: joined.length, n: pg.n });
-      joined += pg.text;
+      joined += glue ? pg.text.slice(1) : pg.text;
     });
     const sents: Sent[] = [];
     let pos = 0;
-    for (const t of splitSentences(joined)) {
+    for (const { t, head } of splitWithHeads(joined)) {
       const at = joined.indexOf(t, pos);
       pos = (at < 0 ? pos : at) + t.length;
       if (isNoiseSentence(t)) continue;
       let n = starts[0].n;
       for (const st of starts) if (st.at <= Math.max(at, 0)) n = st.n;
-      sents.push({ t, page: n });
+      sents.push({ t, page: n, head });
     }
     const label = (a: Sent, b: Sent) => (a.page === b.page ? `${a.page}쪽` : `${a.page}–${b.page}쪽`);
     out.push(...packSentences(sents, label, `p${sectionOffset + i + 1}-`));
@@ -169,7 +258,7 @@ export function resolvePick(byId: Record<string, Chunk>, [id, a, b]: Pick) {
   if (!c) throw new Error('unknown chunk_id ' + id);
   const ss = c.s.slice(a - 1, b);
   const ok = ss.length === b - a + 1 && ss.every((s) => c.t.includes(s));
-  return { id: c.id, sec: c.sec, text: ss.join(' '), range: a === b ? `문장 ${a}` : `문장 ${a}–${b}`, ok, from: a, sentences: ss }; // from·sentences: 화면에서 문장 번호를 붙이고 근거 문장을 고르게 하는 데 쓴다
+  return { id: c.id, sec: c.sec, text: ss.join(' '), range: a === b ? `문장 ${a}` : `문장 ${a}–${b}`, ok, from: a, sentences: ss, heads: (c.heads ?? []).filter((n) => n >= a && n <= b) }; // from·sentences: 화면에서 문장 번호를 붙이고 근거 문장을 고르게 하는 데 쓴다
 }
 
 export function validateQuote(byId: Record<string, Chunk>, id: string, quote: string) {
@@ -261,7 +350,14 @@ export function cleanPlan(
       let b = Math.round(+p.to);
       if (!(a >= 1 && b >= a && b <= c.s.length)) continue;
       if (b - a + 1 > CONFIG.coreSent) b = a + CONFIG.coreSent - 1;
-      pick = [c.id, a, b];
+      // 제목 문장은 핵심 발췌가 될 수 없다. 양 끝의 제목은 잘라 내고, 남는 문장이 없으면 이 pick은 버린다.
+      const hs = c.heads ?? [];
+      let lo = a;
+      let hi = b;
+      while (lo <= hi && hs.includes(lo)) lo++;
+      while (hi >= lo && hs.includes(hi)) hi--;
+      if (lo > hi) continue;
+      pick = [c.id, lo, hi];
       break;
     }
 

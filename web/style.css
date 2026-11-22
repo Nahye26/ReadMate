@@ -49,6 +49,8 @@ label.lbl{display:block;font-weight:600;margin:20px 0 8px}
 .sent.hinted{box-shadow:inset 3px 0 0 var(--accentText)}
 .sent .t{flex:1}
 .sent .tag{margin:0 0 0 auto}
+.sent.head{cursor:default;margin-top:10px}
+.sent.head:hover{background:none}
 .helper{background:var(--white);border:1px solid var(--line);border-radius:14px;padding:22px;position:sticky;top:16px;display:flex;flex-direction:column;gap:14px;max-height:calc(100vh - 32px);overflow:auto}
 .helper .head{display:flex;align-items:center;gap:8px}.helper .head .fill{flex:1;height:1px;background:var(--line)}.helper .head small{color:var(--muted)}
 .box{background:var(--accentSoft);border-radius:10px;padding:12px 14px;color:var(--accentText);font-size:14px}

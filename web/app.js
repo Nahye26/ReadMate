@@ -3,7 +3,7 @@
 // 서버가 상태의 기준이다(진행 순서, 힌트·보완 횟수, 다음 안내 수준). 이 파일은 화면과 호출만 맡는다.
 // 새로고침하면 화면 상태는 사라진다(서버에 세션을 다시 불러오는 함수는 아직 없다).
 import { SUPABASE_URL, SUPABASE_ANON_KEY, CONDITION } from './config.js';
-import { cleanPages } from './pdfclean.mjs';
+import { cleanPages, imageRectsFromOps, HEAD_OPEN, HEAD_CLOSE } from './pdfclean.mjs';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
 const $ = (s, r = document) => r.querySelector(s);
@@ -155,12 +155,18 @@ async function readPdf(file) {
   const lib = await loadPdfJs();
   const pdf = await lib.getDocument({ data: await file.arrayBuffer() }).promise;
   if (pdf.numPages > MAX_PAGES) throw { code: 'toolong' };
-  // 쪽마다 글자 조각의 위치(x, y)와 쪽 높이를 함께 모아 머리말·꼬리말·쪽번호를 걷어 낸다(pdfclean.mjs).
+  // 쪽마다 글자 조각의 위치(x, y)·크기·너비·글꼴과 그림이 그려진 영역을 모아, 머리말·쪽번호·각주·표·캡션을 걷어 내고 제목을 찾고 줄을 잇는다(pdfclean.mjs).
   const raw = [];
   for (let p = 1; p <= pdf.numPages; p++) {
     const page = await pdf.getPage(p);
     const tc = await page.getTextContent();
-    raw.push({ h: page.view[3] - page.view[1], items: tc.items.map((it) => ({ s: it.str, x: it.transform[4], y: it.transform[5], eol: !!it.hasEOL })) });
+    const w = page.view[2] - page.view[0], h = page.view[3] - page.view[1];
+    let images = [];
+    try { // 그림 영역을 못 구해도(오류) 글 추출은 계속한다
+      const ol = await page.getOperatorList();
+      images = imageRectsFromOps(ol.fnArray, ol.argsArray, lib.OPS, w, h);
+    } catch (_) { /* 그림 영역 없이 진행 */ }
+    raw.push({ h, images, items: tc.items.map((it) => ({ s: it.str, x: it.transform[4], y: it.transform[5], eol: !!it.hasEOL, h: it.height, w: it.width, font: it.fontName })) });
   }
   const sections = [];
   cleanPages(raw).forEach((t, i) => { if (t.trim().length > 20) sections.push({ sec: `${i + 1}쪽`, text: t }); });
@@ -171,26 +177,42 @@ async function readPdf(file) {
 
 // 자료를 나눠 올린다. 서버는 한 번에 청크 30개까지만 받는다. 청크는 약 400자이므로 6000자 배치는 청크 15개 안팎이다.
 const BATCH_CHARS = 6000; // 임베딩을 외부 API로 받으므로 서버 계산 부담이 작다. 여러 쪽을 한 번에 보내 왕복을 줄이고, 쪽 경계에서 청크가 끊기는 곳도 줄인다(청크 약 15개).
+// 아주 긴 쪽을 나눌 때 어절·제목 표시 한가운데서 자르지 않는다. 공백에서 자르고, 제목 표시가 열린 채면 그 앞에서 자른다.
+function splitLong(text, max = 4500) {
+  const out = [];
+  let rest = text;
+  while (rest.length > max) {
+    let cut = rest.lastIndexOf(' ', max);
+    if (cut < max * 0.5) cut = max;
+    const head = rest.slice(0, cut);
+    if (head.split(HEAD_OPEN).length > head.split(HEAD_CLOSE).length) { const at = head.lastIndexOf(HEAD_OPEN); if (at > 0) cut = at; }
+    out.push(rest.slice(0, cut));
+    rest = rest.slice(cut).trimStart();
+  }
+  if (rest) out.push(rest);
+  return out;
+}
 async function uploadSource(title, pdf) {
   const batches = [];
   let cur = [], len = 0;
   pdf.sections.forEach((s) => {
     if (cur.length && len + s.text.length > BATCH_CHARS) { batches.push(cur); cur = []; len = 0; }
     // 한 쪽이 아주 길면 쪽 하나를 여러 섹션으로 나눈다(청크 ID는 섹션 번호 기준이라 겹치지 않는다).
-    for (let k = 0; k < s.text.length; k += 4500) { cur.push({ sec: s.sec, text: s.text.slice(k, k + 4500) }); len += Math.min(4500, s.text.length - k); }
+    splitLong(s.text).forEach((part) => { cur.push({ sec: s.sec, text: part }); len += part.length; });
   });
   if (cur.length) batches.push(cur);
   // 빈 자료를 먼저 만들어 source_id를 확보한 뒤, 배치를 하나씩 이어 붙인다. 한 배치가 실패하면 그 배치만 다시 보낸다(서버는 같은 청크를 덮어쓴다).
   const created = await call('ingest-source', { title, lang: pdf.lang, pages: pdf.pages });
   const id = created.source_id;
-  let sent = 0, idx = 0;
+  let sent = 0, idx = 0, carry = '';
   for (let b = 0; b < batches.length; b++) {
     const msg = $('#layer .box2 div:last-child');
     if (msg) msg.textContent = `자료를 올리는 중이에요… ${b + 1}/${batches.length}`;
     let r, lastErr;
     for (let attempt = 0; attempt < 4 && !r; attempt++) {
       try {
-        r = await call('ingest-source', { source_id: id, sections: batches[b], section_offset: sent, idx_start: idx });
+        // carry: 앞 배치 끝에서 아직 끝나지 않은 문장. 서버가 이 배치 맨 앞에 붙인다("(김철수,"와 "2021)에서"가 갈라지지 않게). 마지막 배치는 남김없이 저장한다.
+        r = await call('ingest-source', { source_id: id, sections: batches[b], section_offset: sent, idx_start: idx, carry, last: b === batches.length - 1 });
       } catch (e) {
         lastErr = e;
         if (e.status && e.status < 500) throw e; // 요청 자체가 잘못된 경우는 다시 보내도 같다
@@ -198,7 +220,7 @@ async function uploadSource(title, pdf) {
       }
     }
     if (!r) throw lastErr;
-    idx = r.next_idx; sent += batches[b].length;
+    idx = r.next_idx; sent += batches[b].length; carry = r.carry || '';
   }
   return { id, title, pages: pdf.pages };
 }
@@ -279,6 +301,8 @@ function readerHtml() {
   const core = m.excerpts.find((e) => e.role === 'core');
   return `<div class="src">원문 · ${esc(secLabel(core.sec))}</div>` + readerLayout().map(({ e, off }) => `<div class="para">${e.sentences.map((s, k) => {
     const n = off + k + 1;
+    // 제목 문장은 굵게 보여 주고 근거로 고를 수 없다(번호는 건너뛰지 않는다: 서버의 근거 번호와 맞아야 한다).
+    if ((e.heads || []).includes((e.from || 1) + k)) return `<div class="sent head" data-n="${n}"><span class="n">${n}</span><span class="t"><b>${esc(s)}</b></span></div>`;
     const cls = ['sent', S.ui.evidence.includes(n) ? 'picked' : '', S.ui.hintSents.includes(n) ? 'hinted' : ''].join(' ');
     return `<div class="${cls}" data-n="${n}" role="button" tabindex="0" aria-pressed="${S.ui.evidence.includes(n)}"><span class="n">${n}</span><span class="t">${esc(s)}</span>${S.ui.hintSents.includes(n) ? '<span class="tag">힌트</span>' : ''}</div>`;
   }).join('')}</div>`).join('');
@@ -332,7 +356,7 @@ function workScreen() {
     u.evidence = u.evidence.includes(n) ? u.evidence.filter((x) => x !== n) : [...u.evidence, n].slice(-5).sort((a, b) => a - b);
     keep(); workScreen();
   };
-  document.querySelectorAll('.sent').forEach((el) => {
+  document.querySelectorAll('.sent:not(.head)').forEach((el) => {
     el.addEventListener('click', () => { if (u.phase === 'answer') pickSent(el); });
     el.addEventListener('keydown', (e) => { if ((e.key === 'Enter' || e.key === ' ') && u.phase === 'answer') { e.preventDefault(); pickSent(el); } });
   });

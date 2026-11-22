@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert';
 import { createRequire } from 'node:module';
 import {
-  splitSentences, buildChunks, buildChunksFromSections, CHUNK_CONFIG, resolvePick, validateQuote, isCopy, cleanPlan, extractReqs, nextSupport, calibrate,
+  splitSentences, splitWithHeads, withholdTail, isNoiseSentence, HEAD_OPEN, HEAD_CLOSE, buildChunks, buildChunksFromSections, CHUNK_CONFIG, resolvePick, validateQuote, isCopy, cleanPlan, extractReqs, nextSupport, calibrate,
   summarize, EXPERIMENT_FLOW, DEFAULT_FLOW, contextIds, resolveExcerpts, estimateMins, normalizeAssignment,
   CONFIG, MAX_TEXT_UNITS, MAX_HINT, missionState, currentMission, answerOutcome, leaksKey, sentenceNums, pickQtype, supportBefore,
 } from './core.ts';
@@ -44,16 +44,71 @@ test('청킹: 문장 5~10개, 목표 700자에서 끊고, 짧은 꼬리는 이�
   assert.strictEqual(buildChunks(sent(3, 50), 's', 'e-')[0].s.length, 3);
 });
 
-test('문장 분리: 제목 번호(III. 1.)로 끝나는 짧은 조각은 뒤 문장과 합친다', () => {
-  const r = splitSentences('III. 연구 방법 1. 사례 선정 근거 본 연구에서는 사례를 선정하였다. 둘째 문장이다.');
-  assert.deepStrictEqual(r, ['III. 연구 방법 1. 사례 선정 근거 본 연구에서는 사례를 선정하였다.', '둘째 문장이다.']);
-  // 보통 문장은 그대로 자른다
-  assert.deepStrictEqual(splitSentences('첫 문장이다. 둘째 문장이다.'), ['첫 문장이다.', '둘째 문장이다.']);
-  // 숫자로 끝나도 긴 문장은 합치지 않는다
-  const long = '이 문장은 충분히 길어서 제목 번호가 아니라 일반 문장이며 마지막이 숫자 6.';
-  assert.strictEqual(splitSentences(long + ' 다음 문장이다.').length, 2);
-  // 맨 끝의 제목 번호 조각도 잃지 않는다
+test('문장 분리: 온점(. ? !) 뒤 공백에서만 자른다. 쉼표와 글자 수는 기준이 아니다', () => {
+  assert.deepStrictEqual(splitSentences('첫 문장이다. 둘째 문장이다? 셋째다!'), ['첫 문장이다.', '둘째 문장이다?', '셋째다!']);
+  // 인용 (김철수, 2021) 은 쉼표로 갈라지지 않는다
+  assert.deepStrictEqual(splitSentences('이는 선행연구(김철수, 2021)에서도 확인되었다. 다음 문장이다.'), ['이는 선행연구(김철수, 2021)에서도 확인되었다.', '다음 문장이다.']);
+  // 아주 짧은 문장도, 아주 긴 문장도 글자 수로 합치거나 쪼개지 않는다
+  assert.deepStrictEqual(splitSentences('네. 그렇다.'), ['네.', '그렇다.']);
+  const long = '가'.repeat(900) + '.';
+  assert.deepStrictEqual(splitSentences(long + ' 다음이다.'), [long, '다음이다.']);
+});
+
+test('문장 분리: 괄호·따옴표 안의 온점은 자르지 않는다', () => {
+  assert.deepStrictEqual(
+    splitSentences('다섯 가지(1. 비용 2. 시간 3. 접근성)로 정리된다. 다음 문장이다.'),
+    ['다섯 가지(1. 비용 2. 시간 3. 접근성)로 정리된다.', '다음 문장이다.'],
+  );
+  assert.deepStrictEqual(splitSentences('그는 “효과가 있다. 그러나 한계도 있다.”라고 했다. 끝이다.'), ['그는 “효과가 있다. 그러나 한계도 있다.”라고 했다.', '끝이다.']);
+  // 닫는 따옴표·괄호 바로 앞의 온점은 닫은 뒤 공백에서 자른다
+  assert.deepStrictEqual(splitSentences('그는 “그렇다.” 다음이다. (참고: 부록.) 끝이다.'), ['그는 “그렇다.”', '다음이다.', '(참고: 부록.)', '끝이다.']);
+  // 짝 없는 여는 괄호가 문서 끝까지 문장을 삼키지 않는다(400자 안전장치)
+  const out = splitSentences('시작(괄호가 안 닫힌다 ' + '가나다라.'.repeat(120) + ' 다음 문장이다. 또 다음이다.');
+  assert.ok(out.length > 1);
+});
+
+test('문장 분리: 영문 약어와 이니셜, 문장 맨 앞의 번호 토큰은 자르지 않는다', () => {
+  assert.deepStrictEqual(splitSentences('Smith et al. found the effect. 다음이다.'), ['Smith et al. found the effect.', '다음이다.']);
+  assert.deepStrictEqual(splitSentences('Kim et al. (2014)은 이를 보였다. 다음이다.'), ['Kim et al. (2014)은 이를 보였다.', '다음이다.']);
+  assert.deepStrictEqual(splitSentences('J. H. Smith는 이를 제안했다. 다음이다.'), ['J. H. Smith는 이를 제안했다.', '다음이다.']);
+  assert.deepStrictEqual(splitSentences('자세한 내용은 pp. 23-25를 보라. 다음이다.'), ['자세한 내용은 pp. 23-25를 보라.', '다음이다.']);
+  assert.deepStrictEqual(splitSentences('비타민 C. 다음 문장이다.'), ['비타민 C.', '다음 문장이다.']);
+  // 번호 토큰은 뒤 글과 붙는다(제목은 쪽 텍스트에서 따로 표시된다)
+  assert.deepStrictEqual(splitSentences('II. 이론적 배경 본 장에서는 개념을 살핀다. 다음이다.'), ['II. 이론적 배경 본 장에서는 개념을 살핀다.', '다음이다.']);
   assert.deepStrictEqual(splitSentences('본문이다. IV.'), ['본문이다.', 'IV.']);
+  assert.strictEqual(isNoiseSentence('IV.'), true); // 끝에 남은 번호 조각은 청킹에서 버린다
+});
+
+test('제목 표시: 제목은 본문과 합쳐지지 않는 독립 문장이고 heads에 번호가 남는다', () => {
+  const text = '앞 문장이다. ' + HEAD_OPEN + 'III. 연구 방법' + HEAD_CLOSE + ' 본 연구는 사례를 선정하였다. 두 번째 문장이다.';
+  assert.deepStrictEqual(splitWithHeads(text).map((x) => [x.t, x.head]), [
+    ['앞 문장이다.', false], ['III. 연구 방법', true], ['본 연구는 사례를 선정하였다.', false], ['두 번째 문장이다.', false],
+  ]);
+  const [c] = buildChunks(text, 's', 'h-');
+  assert.deepStrictEqual(c.heads, [2]);
+  assert.ok(!c.t.includes(HEAD_OPEN) && !c.t.includes(HEAD_CLOSE));
+  // 제목은 pick에서 빠진다
+  const plan = cleanPlan(
+    { reqs: ['a', 'b'], missions: [{ req: 1, picks: [{ chunk_id: 'h-1', from: 2, to: 3 }], variants: [{ qtype: 'literal', question: 'q?', key_points: ['k'] }] }] },
+    [c], { reqs: ['요구 하나 입니다', '요구 둘 입니다'] },
+  );
+  assert.deepStrictEqual(plan.missions[0].pick, ['h-1', 3, 3]);
+});
+
+test('배치 경계: 끝나지 않은 마지막 문장은 carry로 떼어 다음 배치에 붙인다', () => {
+  const a = withholdTail([{ sec: '3쪽', text: '앞 문장이다. 이는 선행연구(김철수,' }]);
+  assert.strictEqual(a.carry, '이는 선행연구(김철수,');
+  assert.deepStrictEqual(a.sections, [{ sec: '3쪽', text: '앞 문장이다.' }]);
+  // 다음 배치 맨 앞에 붙이면 인용이 한 문장으로 이어진다
+  const next = a.carry + ' ' + '2021)에서도 확인되었다. 다음이다.';
+  assert.deepStrictEqual(splitSentences(next), ['이는 선행연구(김철수, 2021)에서도 확인되었다.', '다음이다.']);
+  // 마침표로 끝났으면 떼지 않는다. 마침표 뒤 닫는 따옴표도 끝난 것으로 본다
+  assert.strictEqual(withholdTail([{ sec: '1쪽', text: '끝난 문장이다.' }]).carry, '');
+  assert.strictEqual(withholdTail([{ sec: '1쪽', text: '그는 “그렇다.”' }]).carry, '');
+  // 문장 하나가 통째로 꼬리면 그 구간이 비므로 섹션을 뺀다
+  assert.deepStrictEqual(withholdTail([{ sec: '1쪽', text: '아직 안 끝난' }]), { sections: [], carry: '아직 안 끝난' });
+  // 너무 긴 꼬리는 떼지 않는다
+  assert.strictEqual(withholdTail([{ sec: '1쪽', text: '가'.repeat(2000) }]).carry, '');
 });
 
 test('청킹: 쪽번호·구분선 같은 조각은 버린다', () => {
