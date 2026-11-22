@@ -2,6 +2,8 @@
 // 입력: { source_id, assignment, condition: 'A'|'B', experiment?, fast?, researcher?, paper_id?, consent_research?, consent_answers? }
 // 동작:
 //   1) 질문 세트 확보: 계획 = 과제 안내문 임베딩으로 찾은 상위 청크 → LLM → 서버 검증(cleanPlan). 미션마다 핵심 청크 하나 안의 1~3문장.
+//      - 사용성 테스트(experiment = false)는 계획에 질문을 넣지 않는다(lazy). 질문은 미션을 시작할 때 make-question이 학생이 읽을 앞·핵심·뒤 청크를 보고 만든다.
+//        단계는 과제 요구 항목의 유형(정보/분석/의견)이 정한 시작 단계에서 앞 미션 결과로 한 단계씩 움직인다(core.ts levelDepth). 학습자가 고르지 않는다.
 //      - experiment = true (효과성 검증): (자료, 과제 안내문)마다 한 번만 만들어 question_sets에 저장하고 A/B가 같은 세트를 쓴다.
 //      - experiment = false (사용성 테스트): 세션마다 새로 만든다. 저장하지 않는다(question_set_id = null).
 //   2) 조건 B: 같은 계획의 핵심 청크에 같은 절의 앞·뒤 청크를 붙인다(contextIds). 질문·판정 기준은 A와 같다.
@@ -9,7 +11,7 @@
 // 출력: 학생에게 보여 줄 미션(발췌 원문, 질문 변형). 판정 기준(key_points)은 응답에 포함하지 않는다.
 import {
   CONFIG, cleanPlan, extractReqs, contextIds, DEFAULT_FLOW, estimateMins, EXPERIMENT_FLOW, normalizeAssignment, pickQtype, resolveExcerpts,
-  basisFor, type Basis, type Chunk, type ChunkRef, type Condition, type PlanData,
+  basisFor, levelDepth, levelInfos, LEVEL_RANGE, QTYPES, type Basis, type Chunk, type ChunkRef, type Condition, type PlanData,
 } from '../_shared/core.ts';
 import { EmbedError, embedMany, toVector } from '../_shared/embed.ts';
 import { authedUser, corsHeaders, json, serviceClient } from '../_shared/http.ts';
@@ -44,7 +46,7 @@ const toChunk = (r: Row): Chunk => ({ id: r.id, sec: r.sec, s: r.sentences, t: r
 // 질문 세트를 만든다. fixed(효과성 검증)면 저장된 세트를 우선 쓰고 없으면 만들어 저장한다. 아니면 매번 새로 만들고 저장하지 않는다.
 async function questionSetFor(
   db: Db,
-  a: { sourceId: string; assignment: string; fast: boolean; paperId: string | null; fixed: boolean; basis: Basis },
+  a: { sourceId: string; assignment: string; fast: boolean; paperId: string | null; fixed: boolean; basis: Basis; lazy: boolean },
 ): Promise<{ id: string | null; plan: PlanData }> {
   // fast(미션 2개)는 세트 모양이 다르므로 키에 넣어 정식 세트와 섞이지 않게 한다.
   const hash = await sha256(normalizeAssignment(a.assignment) + (a.fast ? '|fast' : ''));
@@ -94,8 +96,8 @@ async function questionSetFor(
   const hasReqs = reqs.length >= 2;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const data = await askJson(buildPlanPrompt({ assignment: a.assignment, candidates, fast: a.fast, basis: a.basis, reqs: hasReqs ? reqs : undefined, groups, retryNote: note }), undefined, 'plan');
-      const tried = cleanPlan(data, candidates, { maxMissions: a.fast ? 2 : undefined, reqs: hasReqs ? reqs : undefined, allowed });
+      const data = await askJson(buildPlanPrompt({ assignment: a.assignment, candidates, fast: a.fast, basis: a.basis, reqs: hasReqs ? reqs : undefined, groups, retryNote: note, lazy: a.lazy }), undefined, 'plan');
+      const tried = cleanPlan(data, candidates, { maxMissions: a.fast ? 2 : undefined, reqs: hasReqs ? reqs : undefined, allowed, lazy: a.lazy });
       const minM = a.fast ? 1 : CONFIG.minMissions;
       const better = !plan || (tried.uncovered?.length ?? 0) < (plan.uncovered?.length ?? 99) ||
         ((tried.uncovered?.length ?? 0) === (plan.uncovered?.length ?? 99) && tried.missions.length > plan.missions.length);
@@ -151,7 +153,8 @@ Deno.serve(async (req) => {
     return json({ error: 'bad_request', message: 'condition은 A 또는 B여야 합니다' }, 400);
   }
   const cond = condition as Condition;
-  const basis = basisFor(!!experiment, cond); // 사용성 테스트(B)는 핵심 청크 전체, 효과성 검증은 고른 문장만을 근거로 삼는다
+  const lazy = !experiment; // 사용성 테스트: 질문을 미션 시작 때 만든다. 효과성 검증은 A/B가 같은 고정 세트를 쓰므로 계획 때 만든다.
+  const basis: Basis = lazy ? 'mission' : basisFor(!!experiment, cond); // 사용성 테스트는 미션 읽기 범위 전체, 효과성 검증은 고른 문장만을 근거로 삼는다
 
   const db = serviceClient();
 
@@ -169,6 +172,7 @@ Deno.serve(async (req) => {
       paperId: typeof paper_id === 'string' ? paper_id.slice(0, 80) : null,
       fixed: !!experiment,
       basis,
+      lazy,
     });
   } catch (e) {
     if (e instanceof PlanError) return json({ error: e.code, message: e.message }, e.status);
@@ -200,7 +204,7 @@ Deno.serve(async (req) => {
 
   const shown = plan.missions.map((m) => {
     const ctx = cond === 'B' ? contextIds(refOf(m.pick[0]), refs) : [m.pick[0]];
-    const excerpts = resolveExcerpts(byId, m.pick, cond, ctx);
+    const excerpts = resolveExcerpts(byId, m.pick, lazy ? 'B' : cond, ctx); // lazy는 A도 핵심 청크 전체를 보여 준다(질문이 청크 전체를 근거로 하므로)
     return { ctx, excerpts, mins: estimateMins(excerpts.reduce((n, e) => n + e.text.length, 0)) };
   });
 
@@ -220,7 +224,7 @@ Deno.serve(async (req) => {
       consent_research: !!consent_research,
       consent_answers: !!consent_answers,
       assignment: consent_answers ? assignment : null, // 답변 저장 동의가 없으면 과제 안내문도 남기지 않는다
-      config: { ...flow, reqs: plan.reqs, basis }, // submit-answer가 과제 요구 항목을 읽는다(세트를 저장하지 않는 세션도 있다)
+      config: { ...flow, reqs: plan.reqs, req_types: plan.reqTypes, basis, lazy }, // 서버 함수들이 요구 항목·유형·질문 시점을 읽는다(세트를 저장하지 않는 세션도 있다)
     })
     .select('id')
     .single();
@@ -232,12 +236,12 @@ Deno.serve(async (req) => {
     req: m.req,
     picks: [m.pick], // 핵심 발췌(A 기준). 기존 형식([[chunkId, from, to], ...])을 유지한다.
     context_ids: shown[idx].ctx,
-    variants: m.vars.map((v) => ({ qtype: v.qtype, question: v.q, cue: v.cue, frame: v.frame })), // key_points 제외
+    variants: lazy ? [] : m.vars.map((v) => ({ qtype: v.qtype, question: v.q, cue: v.cue, frame: v.frame })), // key_points 제외. lazy는 make-question이 채운다
   }));
   const secretRows = plan.missions.map((m, idx) => ({
     session_id: session.id,
     idx,
-    key_points: Object.fromEntries(m.vars.map((v) => [v.qtype, v.keys])),
+    key_points: lazy ? {} : Object.fromEntries(m.vars.map((v) => [v.qtype, v.keys])),
   }));
   const m1 = await db.from('missions').insert(missionRows);
   const m2 = m1.error ? null : await db.from('mission_secrets').insert(secretRows);
@@ -247,6 +251,8 @@ Deno.serve(async (req) => {
   }
 
   // 세션 소요 시간 추정(분): 미션별 읽기·답변 + 인출·연결. 하한(CONFIG.minMins)에 못 미치면 화면이 알 수 있게 표시한다(fast 제외).
+  const levels = levelInfos(plan.missions, plan.reqs, plan.reqTypes);
+  const depth0 = levelDepth([], 0, levels, flow.adaptDepth);
   const estMins = shown.reduce((n, x) => n + x.mins, 0) + CONFIG.recallMins;
   return json({
     session_id: session.id,
@@ -257,15 +263,20 @@ Deno.serve(async (req) => {
     below_min_missions: !fast && plan.missions.length < CONFIG.minMissions, // 재시도 후에도 마무리 제외 미션이 최소 개수에 못 미침
     flow,
     // 첫 미션의 안내 수준·깊이·질문 유형. 이후 미션은 submit-answer가 미션이 끝날 때마다 next_support로 돌려준다.
+    lazy,
+    req_types: levels.map((l) => l.type),
     start_support: {
       sup: CONFIG.supStart,
-      depth: 0,
-      qtype: pickQtype(plan.missions[0].vars.map((v) => v.qtype), 0, { adaptDepth: flow.adaptDepth, last: plan.missions.length === 1 }),
+      depth: depth0,
+      qtype: lazy
+        ? QTYPES[depth0]
+        : pickQtype(plan.missions[0].vars.map((v) => v.qtype), depth0, { adaptDepth: flow.adaptDepth, last: plan.missions.length === 1, maxDepth: LEVEL_RANGE[levels[0].type].max }),
     },
     missions: plan.missions.map((m, idx) => ({
       idx,
       req: m.req,
       mins: shown[idx].mins,
+      req_type: levels[idx].type,
       text_units: shown[idx].ctx.length,
       excerpts: shown[idx].excerpts,
       variants: missionRows[idx].variants,

@@ -11,6 +11,14 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 const params = new URLSearchParams(location.search);
 const MAX_PAGES = 40;
 const QLABEL = { literal: '이해', inferential: '추론', evaluative: '평가' };
+// 질문 단계(학습자가 고르지 않는다. 과제 요구 항목의 유형과 앞 미션 결과로 서버가 정한다)
+const LEVEL_LABEL = { literal: '1단계 · 정리', inferential: '2단계 · 추론', evaluative: '3단계 · 평가' };
+const REQ_TYPE_LABEL = { info: '정보 정리', analysis: '분석·설명', opinion: '의견·평가' };
+const evidenceMin = () => {
+  const m = S.plan.missions[S.mi];
+  const n = m.excerpts.reduce((c, e) => c + e.sentences.length - (e.heads || []).filter((h) => h >= (e.from || 1) && h < (e.from || 1) + e.sentences.length).length, 0);
+  return S.plan.lazy ? Math.max(1, Math.min(2, n)) : 0; // 사용성 테스트(lazy)는 근거 문장 필수(2개 이상)
+};
 const HINT_NAME = { 1: '1단계 · 관점', 2: '2단계 · 위치', 3: '3단계 · 구조' };
 const JOL_LABEL = { 0.125: '거의 못 떠올려요', 0.375: '일부만 떠올려요', 0.625: '대부분 떠올려요', 0.875: '거의 다 떠올려요' };
 const EXIT_REASONS = ['너무 어려워요', '시간이 없어요', '내용이 과제와 맞지 않아요', '기타'];
@@ -274,17 +282,35 @@ function planScreen() {
   </section><aside class="scope"><div class="card"><h3>읽을 범위</h3>
     <div><span class="tag">PDF</span> ${esc(S.source.title)}</div>
     <div class="tags">${pages.map((p) => `<span class="tag">${esc(p)}</span>`).join('')}</div><hr>
-    <h3>과제 요구 항목</h3>${ms.map((m, i) => `<div class="req"><span>${esc(reqTitle(i))}</span><span class="tag">미션 ${i + 1}</span></div>`).join('')}
+    <h3>과제 요구 항목</h3>${ms.map((m, i) => `<div class="req"><span>${esc(reqTitle(i))}</span><span class="tag">${esc(REQ_TYPE_LABEL[m.req_type] || '')} · 미션 ${i + 1}</span></div>`).join('')}
     <hr><div class="hint-text">예상 시간 약 ${total}분</div></div></aside></div>`, { noSteps: true });
   $('#start').addEventListener('click', () => beginMission(0, S.plan.start_support));
   $('#redo').addEventListener('click', makePlan);
 }
 
 /* ---------- 3. 읽기 작업 ---------- */
-function beginMission(i, support) {
+async function beginMission(i, support) {
   S.mi = i; S.support = support; S.qtype = support.qtype;
   S.ui = { answer: '', evidence: [], hints: [], hintSents: [], fb: null, phase: 'answer', cue: support.sup >= 1, notice: '', reported: [], error: null, lastGap: '' };
+  const m = S.plan.missions[i];
+  if (S.plan.lazy && !m.variants.length) { // 질문은 미션을 시작할 때, 학생이 읽을 글을 보고 만든다
+    try {
+      const q = await withBusy('이번에 읽을 글에 맞춰 질문을 만드는 중이에요…', () => call('make-question', { session_id: S.plan.session_id, mission_idx: i }));
+      m.variants = [q.variant]; S.qtype = q.qtype; S.support = { ...support, ...(q.support || {}), qtype: q.qtype };
+    } catch (e) {
+      S.ui.error = e; S.ui.retryMake = true;
+      return questionFailScreen();
+    }
+  }
   workScreen();
+}
+// 질문을 만들지 못했을 때: 같은 미션을 다시 시도한다(진행 상태는 서버에 그대로 있다)
+function questionFailScreen() {
+  S.screen = 'work';
+  shell(`${S.source.title} · 미션`, `m${S.mi}`, `<div class="work"><section class="reader" id="reader"></section><aside class="helper">
+    <div class="head"><b>읽기 도우미</b><span class="tag">AI</span></div>${errBox(S.ui.error)}
+    <div class="bar"><span class="sp"></span><button class="btn primary" id="retryq" type="button">질문 다시 만들기</button></div></aside></div>`);
+  $('#retryq').addEventListener('click', () => beginMission(S.mi, S.support));
 }
 const variant = () => { const m = S.plan.missions[S.mi]; return m.variants.find((v) => v.qtype === S.qtype) || m.variants[0]; };
 
@@ -315,7 +341,7 @@ function workScreen() {
   const hintsLeft = 3 - r.hint;
   const cite = u.evidence.length
     ? `<div class="cite">${u.evidence.map((n) => `<span class="tag">문장 ${n}</span>`).join('')}</div>`
-    : '<div class="hint-text">왼쪽 원문에서 문장을 눌러 근거로 추가해 보세요. (선택)</div>';
+    : `<div class="hint-text">왼쪽 원문에서 문장을 눌러 근거로 추가해 보세요. ${evidenceMin() ? `(필수 · ${evidenceMin()}개 이상)` : '(선택)'}</div>`;
   const fb = u.fb;
   let fbHtml = '';
   if (fb) {
@@ -338,7 +364,7 @@ function workScreen() {
     <aside class="helper" aria-label="읽기 도우미">
       <div class="head"><b>읽기 도우미</b><span class="tag">AI</span><span class="fill"></span><small>미션 ${S.mi + 1} / ${S.plan.missions.length}</small></div>
       ${u.cue ? `<div class="box"><b>읽기 전에 볼 점</b>${esc(v.cue)}</div>` : `<button class="link" id="cue" type="button">읽기 전에 볼 점 보기</button>`}
-      <div class="q"><small>질문 · ${QLABEL[S.qtype]}</small><p>${esc(v.question)}</p></div>
+      <div class="q"><small>질문 · ${S.plan.lazy ? LEVEL_LABEL[S.qtype] : QLABEL[S.qtype]}${S.plan.missions[S.mi].req_type ? ` · ${REQ_TYPE_LABEL[S.plan.missions[S.mi].req_type]}` : ''}</small><p>${esc(v.question)}</p></div>
       ${u.hints.map((h) => `<div class="feed"><span class="tag accent">AI 힌트</span> <span class="tag">${HINT_NAME[h.level]}</span><p style="margin:10px 0 0">${esc(h.text)}</p>${h.quote ? `<p style="margin:6px 0 0;color:var(--sub)">“${esc(h.quote)}” <span class="tag">${esc(h.location)}</span></p>` : ''}</div>`).join('')}
       ${answerBlock}${fbHtml}${reportChips}
       ${u.error ? errBox(u.error) : ''}
@@ -374,7 +400,8 @@ async function getHint() {
     const h = await withBusy('힌트를 만드는 중이에요…', () => call('submit-answer', { session_id: S.plan.session_id, mission_idx: S.mi, action: 'hint', qtype: S.qtype }));
     S.rec[S.mi].hint = h.hint_level;
     u.hints.push(h); u.error = null;
-    if (h.quote) { // 위치 힌트: 해당 문장을 원문에서 표시한다
+    if (h.sentences?.length) u.hintSents.push(...h.sentences); // 위치 힌트(읽은 글 전체 번호): 해당 문장을 원문에서 표시한다
+    else if (h.quote) {
       const lay = readerLayout().find((x) => x.e.role === 'core');
       lay.e.sentences.forEach((s, k) => { if (h.quote.includes(s)) u.hintSents.push(lay.off + k + 1); });
     }
@@ -385,6 +412,7 @@ async function getHint() {
 async function submitAnswer() {
   keep(); const u = S.ui;
   if (!u.answer.trim()) { u.error = { message: '답을 먼저 써 주세요.' }; return workScreen(); }
+  if (u.evidence.length < evidenceMin()) { u.error = { message: `근거 문장을 ${evidenceMin()}개 이상 골라 주세요. 왼쪽 원문에서 문장을 눌러 선택해요.` }; return workScreen(); }
   u.error = null; u.notice = '';
   try {
     const res = await withBusy('답을 확인하는 중이에요…', () => call('submit-answer', {

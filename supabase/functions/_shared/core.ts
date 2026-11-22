@@ -7,10 +7,11 @@ export type Chunk = { id: string; sec: string; s: string[]; t: string; heads?: n
 export type Pick = [chunkId: string, from: number, to: number];
 // 질문·판정·힌트·인출이 근거로 삼는 범위. excerpt: 고른 1~3문장만(A 기준, 효과성 검증). chunk: 고른 문장이 속한 핵심 청크 전체(조건 B, 사용성 테스트).
 // 앞뒤 청크는 어느 쪽이든 근거 범위가 아니다(context_used 판단에만 쓴다).
-export type Basis = 'excerpt' | 'chunk';
-export const basisPick = (basis: Basis | undefined, pick: Pick, len: number): Pick => (basis === 'chunk' ? [pick[0], 1, len] : pick);
-// 사용성 테스트(실험 모드가 아니고 조건 B)만 청크 전체를 근거로 삼는다. 효과성 검증은 A/B가 같은 세트와 같은 기준을 써야 한다.
-export const basisFor = (experiment: boolean, condition: Condition): Basis => (!experiment && condition === 'B' ? 'chunk' : 'excerpt');
+// mission: 미션에서 학생이 읽는 앞·핵심·뒤 청크 전체(2026-11-23 결정: 미션 내 읽기 전체를 종합해 답하는 질문). 질문은 미션 시작 때 이 범위를 보고 만든다.
+export type Basis = 'excerpt' | 'chunk' | 'mission';
+export const basisPick = (basis: Basis | undefined, pick: Pick, len: number): Pick => (basis === 'chunk' || basis === 'mission' ? [pick[0], 1, len] : pick);
+// 사용성 테스트(실험 모드가 아니고 조건 B)는 미션 전체를 근거로 삼는다. 효과성 검증은 A/B가 같은 세트와 같은 기준을 써야 한다(발췌).
+export const basisFor = (experiment: boolean, condition: Condition): Basis => (!experiment && condition === 'B' ? 'mission' : 'excerpt');
 export type QType = 'literal' | 'inferential' | 'evaluative';
 export type Condition = 'A' | 'B';
 
@@ -288,12 +289,74 @@ export function isCopy(answer: string, excerpt: string): boolean {
   return hit / a.size >= 0.85;
 }
 
+/* ---------- 요구 항목 유형과 질문 단계 ---------- */
+// 질문 단계(코드 depth는 0부터, 화면·문서의 1/2/3단계):
+//   1단계(depth 0) 정리: 한 청크 안의 서로 다른 문장 2~3개를 비교·순서·원인과 결과로 묶어 자기 말로 정리. 한 문장에서 답이 나오는 정의·사실 확인은 내지 않는다.
+//   2단계(depth 1) 추론: 서로 다른 청크 2개 이상을 연결해 글에 적히지 않은 결론을 이끌어 낸다.
+//   3단계(depth 2) 평가: 주장과 근거를 따져 판단하고 과제에 적용한다. 정답이 하나로 정해지지 않는다.
+// 학습자가 난이도를 고르지 않는다. 시작 단계는 과제 요구 항목의 유형이 정하고, 미션이 끝날 때마다 성과로 한 단계씩 움직인다(미션 사이 적응만).
+export type ReqType = 'info' | 'analysis' | 'opinion';
+export const REQ_TYPES: ReqType[] = ['info', 'analysis', 'opinion'];
+export const REQ_TYPE_LABEL: Record<ReqType, string> = { info: '정보 찾기·정리', analysis: '분석·설명', opinion: '의견·평가·적용' };
+// 유형별 시작·범위. 정보형에는 3단계(평가)를 내지 않는다(과제가 요구하지 않는 활동). 모든 유형이 1단계까지 내려갈 수 있다(힘들면 본문부터 소화).
+export const LEVEL_RANGE: Record<ReqType, { start: number; min: number; max: number }> = {
+  info: { start: 0, min: 0, max: 1 },
+  analysis: { start: 1, min: 0, max: 2 },
+  opinion: { start: 1, min: 0, max: 2 },
+};
+export const levelLabel = (depth: number) => `${depth + 1}단계`;
+
+// 요구 항목 문장에서 유형을 가른다. 계획 LLM이 돌려준 값이 있으면 그것을 쓰고, 없거나 틀리면 이 규칙을 쓴다(의견 > 분석 > 정보 순으로 먼저 맞는 쪽).
+const OPINION_RE = /비판|견해|의견|입장|주장하|논평|평가하|시사점|함의|제언|제안|대안|적용|바람직|생각을|논하|토론|반박|옹호|찬반/;
+const ANALYSIS_RE = /원인|이유|까닭|비교|대조|차이|영향|효과|관계|요인|과정|기제|분석|설명하|왜|어떻게|한계|문제점|특징|배경|의미/;
+export function classifyReq(text: string): ReqType {
+  if (OPINION_RE.test(text)) return 'opinion';
+  if (ANALYSIS_RE.test(text)) return 'analysis';
+  return 'info';
+}
+export const reqTypeOf = (llm: unknown, text: string): ReqType => (REQ_TYPES.includes(llm as ReqType) ? (llm as ReqType) : classifyReq(text));
+
+// 미션별 요구 항목 번호와 유형. 저장된 계획에 유형이 없으면(이전 세트) 요구 항목 문장에서 가른다.
+export type LevelInfo = { req: number; type: ReqType };
+export function levelInfos(missions: { req: number }[], reqs: string[], reqTypes?: unknown): LevelInfo[] {
+  const types = Array.isArray(reqTypes) ? reqTypes : [];
+  return missions.map((m) => ({ req: m.req, type: reqTypeOf(types[m.req - 1], reqs[m.req - 1] ?? '') }));
+}
+
+// idx번 미션의 단계(depth). 앞선 미션 결과로 처음부터 다시 계산한다(서버가 기준).
+//   - 같은 요구 항목의 다음 미션: 직전 단계에서 출발. 새 요구 항목의 첫 미션: 그 유형의 시작 단계에서 출발.
+//   - 직전 미션이 도움 없이 통과면 +1, 힌트 2단계 이상이거나 미해결이면 −1, 그 밖에는 유지.
+//   - 유형의 범위(LEVEL_RANGE) 안으로 자른다. 의견형은 그 항목의 마지막 미션에서 힘들어하지 않았다면 최상위(3단계)로 올린다.
+//   - 전체의 마지막 미션은 최소 추론(2단계)이다(적응 모드).
+export function levelDepth(turns: TurnRec[], idx: number, levels: LevelInfo[], adaptDepth = true): number {
+  let prev = 0;
+  for (let i = 0; i <= idx; i++) {
+    const lv = levels[i];
+    const r = LEVEL_RANGE[lv.type];
+    let step = 0;
+    if (i > 0 && adaptDepth) {
+      const st = missionState(turns, i - 1);
+      const noHelp = st.closed === 'passed' && st.hintLevel === 0 && st.attempts < 2;
+      const heavy = st.hintLevel >= 2 || st.closed === 'unresolved';
+      step = noHelp ? 1 : heavy ? -1 : 0;
+    }
+    const fresh = i === 0 || lv.req !== levels[i - 1].req;
+    let d = (fresh ? r.start : prev) + step;
+    d = Math.min(r.max, Math.max(r.min, d));
+    const lastOfReq = !levels.slice(i + 1).some((x) => x.req === lv.req);
+    if (adaptDepth && lv.type === 'opinion' && lastOfReq && step >= 0) d = r.max;
+    if (adaptDepth && i === levels.length - 1) d = Math.max(d, Math.min(CONFIG.lastMinDepth, r.max));
+    prev = d;
+  }
+  return prev;
+}
+
 /* ---------- LLM이 만든 읽기 계획 검증 ---------- */
 
 export type Variant = { qtype: QType; q: string; keys: string[]; cue: string; frame: string };
 // 질문 세트의 미션. 조건과 무관하게 A 기준(핵심 청크 하나 안의 1~3문장)으로만 만든다.
 export type Mission = { req: number; pick: Pick; vars: Variant[] };
-export type PlanData = { reqs: string[]; missions: Mission[]; uncovered?: number[] };
+export type PlanData = { reqs: string[]; reqTypes?: ReqType[]; missions: Mission[]; uncovered?: number[]; lazy?: boolean };
 
 // 과제 안내문에서 번호가 붙은 요구 항목(1. 2. 3. / 1) 2) 3) / ① ② ③)을 그대로 뽑는다. 2개 이상이어야 쓰고 최대 4개.
 // "요구 항목"이라는 머리말이 있으면 그 뒤만 본다(상황 설명 속 숫자와 섞이지 않게). 못 뽑으면 빈 배열이고, 그때는 LLM이 요구 항목을 나눈다.
@@ -327,7 +390,7 @@ export function extractReqs(assignment: string): string[] {
 export function cleanPlan(
   data: any,
   candidates: Chunk[],
-  opts: { maxMissions?: number; reqs?: string[]; allowed?: Record<number, Set<string>> } = {},
+  opts: { maxMissions?: number; reqs?: string[]; allowed?: Record<number, Set<string>>; lazy?: boolean } = {},
 ): PlanData {
   const byId: Record<string, Chunk> = {};
   candidates.forEach((c) => (byId[c.id] = c));
@@ -377,7 +440,7 @@ export function cleanPlan(
       });
     });
     vars.sort((x, y) => QTYPES.indexOf(x.qtype) - QTYPES.indexOf(y.qtype));
-    if (!pick || !vars.length) return;
+    if (!pick || (!vars.length && !opts.lazy)) return; // lazy: 질문은 미션 시작 때 만든다(make-question). 계획에는 읽을 곳만 있으면 된다.
 
     missions.push({
       req: reqNo,
@@ -423,7 +486,8 @@ export function cleanPlan(
   if (!kept.length) throw new Error('no valid mission');
   // 미션이 하나도 없는 요구 항목(1부터). 호출한 쪽이 한 번 더 시도하거나 기록한다.
   const uncovered = reqs.map((_, i) => i + 1).filter((n) => !kept.some((m) => m.req === n));
-  return { reqs, missions: kept, ...(uncovered.length ? { uncovered } : {}) };
+  const reqTypes = reqs.map((r, i) => reqTypeOf(data?.req_types?.[i], r));
+  return { reqs, reqTypes, missions: kept, ...(uncovered.length ? { uncovered } : {}), ...(opts.lazy ? { lazy: true } : {}) };
 }
 
 /* ---------- 조건 B: 계획에 앞뒤 청크만 더한다 ---------- */
@@ -525,11 +589,60 @@ export function currentMission(turns: TurnRec[], total: number): number | null {
   return null;
 }
 
-// 판정 → 결과. pass면 통과, 그렇지 않으면 첫 답은 보완 요청, 보완 답은 미해결(요점 공개 후 넘어감).
-export function answerOutcome(attemptsBefore: number, verdict: Verdict): AnswerOutcome {
-  if (verdict === 'pass') return 'passed';
+// 판정 → 결과. 통과는 답이 pass이고 근거 문장이 어긋나지 않은 경우다. 그렇지 않으면 첫 답은 보완 요청, 보완 답은 미해결(요점 공개 후 넘어감).
+// 답은 pass인데 근거가 어긋난(fit 'off') 첫 답은 보완으로 보낸다. 보완 뒤에도 어긋나면 기록만 하고 통과시킨다(근거 때문에 미해결로 넘기지 않는다).
+export function answerOutcome(attemptsBefore: number, verdict: Verdict, fit?: EvidenceFit | null): AnswerOutcome {
+  if (verdict === 'pass' && !(fit === 'off' && attemptsBefore === 0)) return 'passed';
   return attemptsBefore === 0 ? 'revise' : 'unresolved';
 }
+
+/* ---------- 미션 읽기 범위(앞·핵심·뒤 청크)와 근거 문장 ---------- */
+// 화면은 앞·핵심·뒤 청크의 문장에 이어서 번호를 붙인다. 서버도 같은 번호(window 번호, 1부터)로 판정·힌트·근거를 다룬다.
+export type Win = { sentences: string[]; heads: number[]; spans: { id: string; sec: string; from: number; to: number }[] };
+export function buildWindow(chunks: Chunk[]): Win {
+  const sentences: string[] = [];
+  const heads: number[] = [];
+  const spans: Win['spans'] = [];
+  for (const c of chunks) {
+    const from = sentences.length + 1;
+    c.s.forEach((x, k) => {
+      sentences.push(x);
+      if (c.heads?.includes(k + 1)) heads.push(from + k);
+    });
+    spans.push({ id: c.id, sec: c.sec, from, to: sentences.length });
+  }
+  return { sentences, heads, spans };
+}
+// 근거로 고를 수 있는 번호: 범위 안, 제목 아님, 중복 없음, 오름차순, 최대 max개.
+export function windowNums(raw: unknown, w: Win, max = 5): number[] {
+  const nums = (Array.isArray(raw) ? raw : []).map((n) => Math.round(Number(n)));
+  return [...new Set(nums)].filter((n) => n >= 1 && n <= w.sentences.length && !w.heads.includes(n)).sort((a, b) => a - b).slice(0, max);
+}
+// 화면에 보이는 번호로 위치를 말해 준다: "p.3 · 문장 4, 5" (청크를 넘으면 " / "로 이어 붙임)
+export function windowLocation(w: Win, nums: number[]): string {
+  return w.spans
+    .map((sp) => ({ sp, ns: nums.filter((n) => n >= sp.from && n <= sp.to) }))
+    .filter((x) => x.ns.length)
+    .map(({ sp, ns }) => `${sp.sec} · ${sp.id} · ${ns.length === 1 ? `문장 ${ns[0]}` : `문장 ${ns.join(', ')}`}`)
+    .join(' / ');
+}
+export const chunksTouched = (w: Win, nums: number[]) => w.spans.filter((sp) => nums.some((n) => n >= sp.from && n <= sp.to)).length;
+
+// 근거 문장은 필수다(2026-11-23). 두 문장 이상 골라야 하고(한 문장 근거는 자기 말로 바꾸기 어려워 베끼게 된다), 고를 수 있는 문장이 그보다 적으면 그 수만큼.
+export const MIN_EVIDENCE = 2;
+export const minEvidence = (w: Win) => Math.max(1, Math.min(MIN_EVIDENCE, w.sentences.length - w.heads.length));
+
+// 학생이 고른 근거와 판정 기준의 근거 문장(key_points마다 단 번호)이 얼마나 겹치는지. 기준에 번호가 없으면 null(LLM 판단만 쓴다).
+//   good: 기준 근거의 절반 이상을 짚었고 고른 문장의 40% 이상이 기준 근거 / partial: 일부 겹침 / off: 겹침 없음
+export type EvidenceFit = 'good' | 'partial' | 'off';
+export function evidenceFit(selected: number[], keyEvidence: number[][] | undefined): EvidenceFit | null {
+  const target = new Set((keyEvidence ?? []).flat().filter((n) => Number.isInteger(n)));
+  if (!target.size || !selected.length) return null;
+  const hit = selected.filter((n) => target.has(n)).length;
+  if (!hit) return 'off';
+  return hit / target.size >= 0.5 && hit / selected.length >= 0.4 ? 'good' : 'partial';
+}
+export const EVIDENCE_FITS: EvidenceFit[] = ['good', 'partial', 'off'];
 
 const squash = (s: string) => s.replace(/[\s.,?!'"“”]/g, '');
 
@@ -593,9 +706,14 @@ export function nextSupport(
 
 // 질문 유형 고르기: 깊이(0 이해 / 1 추론 / 2 평가)에 가장 가까운 유형, 같은 거리면 더 깊은 쪽.
 // 적응 모드가 아니면 깊이를 1(추론)로 고정하고, 적응 모드의 마지막 미션은 최소 lastMinDepth로 올린다. (index.html pickVariant 이식)
-export function pickQtype(available: QType[], depth: number, opts: { adaptDepth: boolean; last: boolean }): QType {
+export function pickQtype(available: QType[], depth: number, opts: { adaptDepth: boolean; last: boolean; maxDepth?: number }): QType {
   let d = opts.adaptDepth ? depth : 1;
   if (opts.adaptDepth && opts.last) d = Math.max(d, CONFIG.lastMinDepth);
+  if (opts.maxDepth !== undefined) { // 정보형 항목처럼 상한이 있으면 그 위의 유형은 후보에서 뺀다(없으면 그대로)
+    const within = available.filter((q) => QTYPES.indexOf(q) <= opts.maxDepth!);
+    if (within.length) available = within;
+    d = Math.min(d, opts.maxDepth);
+  }
   let best = available[0];
   for (const q of available) {
     const dq = Math.abs(QTYPES.indexOf(q) - d);
@@ -607,7 +725,8 @@ export function pickQtype(available: QType[], depth: number, opts: { adaptDepth:
 
 // idx번 미션을 보여 줄 때의 안내 수준·깊이. 앞선 미션들의 기록(turns)에서 처음부터 다시 계산하므로 서버가 기준이다.
 // 안내 요청(cueAsked)은 서버에 기록이 없어 아직 반영하지 않는다.
-export function supportBefore(turns: TurnRec[], idx: number, flow: FlowOpts) {
+// levels(미션별 요구 항목 번호와 유형)를 주면 깊이를 요구 항목 유형별 시작 단계와 범위로 계산한다(levelDepth). 없으면 예전 방식(모든 미션 0에서 출발, ±1)이다.
+export function supportBefore(turns: TurnRec[], idx: number, flow: FlowOpts, levels?: LevelInfo[]) {
   let cur = { sup: CONFIG.supStart, depth: 0 };
   for (let i = 0; i < idx; i++) {
     const st = missionState(turns, i);
@@ -617,6 +736,7 @@ export function supportBefore(turns: TurnRec[], idx: number, flow: FlowOpts) {
       flow,
     );
   }
+  if (levels && levels[idx]) cur = { ...cur, depth: levelDepth(turns, idx, levels, flow.adaptDepth) };
   return cur;
 }
 
@@ -710,11 +830,11 @@ export const ACTIVITY_BY_QTYPE: Record<QType, string> = {
   evaluative: '주장과 근거 구분하기',
 };
 
-export type MissionRow = { idx: number; context_ids: string[] | null };
+export type MissionRow = { idx: number; req?: number; context_ids: string[] | null };
 
 // turns와 미션 정보에서 세션 요약 입력을 만든다. 시작하지 않은 미션(기록이 없는 미션)은 요약에 넣지 않는다.
 // 끝나지 않은 채 종료된 미션은 미해결로 센다.
-export function missionRecords(turns: TurnRec[], missions: MissionRow[], flow: FlowOpts, condition: Condition | null) {
+export function missionRecords(turns: TurnRec[], missions: MissionRow[], flow: FlowOpts, condition: Condition | null, levels?: LevelInfo[]) {
   const rec = recallState(turns);
   const records: MissionRecord[] = [];
   const selfCorrections: string[] = [];
@@ -742,6 +862,9 @@ export function missionRecords(turns: TurnRec[], missions: MissionRow[], flow: F
       activity: ACTIVITY_BY_QTYPE[st.qtype],
       recalled,
       recallTotal,
+      reqType: levels?.[m.idx]?.type ?? null,
+      evidenceFit: [...answers].reverse().find((t) => t.payload?.evidence_fit)?.payload?.evidence_fit ?? null,
+      chunksUsed: [...answers].reverse().find((t) => typeof t.payload?.chunks_used === 'number')?.payload?.chunks_used ?? null,
     });
     idxs.push(m.idx);
     const lastEv = [...answers].reverse().find((t) => Array.isArray(t.payload?.evidence))?.payload?.evidence;
@@ -777,6 +900,9 @@ export type MissionRecord = {
   activity: string;
   recalled: number; // 인출에서 떠올린 핵심 수
   recallTotal: number; // 핵심 전체 수
+  reqType?: ReqType | null; // 미션의 요구 항목 유형(참가자마다 과제가 달라 분석 때 유형별로 봐야 한다)
+  evidenceFit?: EvidenceFit | null; // 마지막 답의 근거 적합도
+  chunksUsed?: number | null; // 마지막 답이 종합한 청크 수
 };
 
 export type SessionInput = {
@@ -818,6 +944,10 @@ export function summarize(i: SessionInput) {
     context_used: i.missions.map((m) => m.contextUsed),
     evidence_cited: i.missions.map((m) => m.evidenceCited),
     activity_type: i.missions.map((m) => m.activity),
+    level_path: i.missions.map((m) => QTYPES.indexOf(m.qtype) + 1), // 미션별 질문 단계(1 정리 / 2 추론 / 3 평가)
+    req_type: i.missions.map((m) => m.reqType ?? null),
+    evidence_fit: i.missions.map((m) => m.evidenceFit ?? null),
+    chunks_used: i.missions.map((m) => m.chunksUsed ?? null),
     recall_per_mission: i.missions.map((m) => `${m.recalled}/${m.recallTotal}`),
     new_info_in_recall: i.newInfoInRecall,
     recall_done: recallTotal > 0,

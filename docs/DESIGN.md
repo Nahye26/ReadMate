@@ -60,7 +60,7 @@ flowchart LR
      **실험 모드(효과성 검증)**에서는 (자료, 과제 안내문)마다 한 번만 만들어 `question_sets`에 저장하고 A/B 세션이 모두 같은 세트를 쓴다.
      **그 밖(사용성 테스트)**에서는 세션마다 새로 만들고 저장하지 않는다. 과제 요구 항목은 `sessions.config.reqs`에 남긴다.
    - 조건 B: 미션마다 핵심 청크의 같은 절 안 앞 1개·뒤 1개를 붙인다(`contextIds`). 질문·판정 기준은 A와 같다.
-   - **근거 범위(`basis`)**: 질문이 답할 수 있어야 하고 판정·힌트·복붙 감지·인출이 기준으로 삼는 텍스트다. 사용성 테스트(실험 모드 아님, 조건 B)는 `chunk`(고른 문장이 속한 핵심 청크 전체), 그 밖(효과성 검증, 조건 A)은 `excerpt`(고른 1~3문장)다. 실험 모드는 A/B가 같은 질문 세트와 같은 기준을 써야 하므로 항상 `excerpt`다. 앞뒤 청크는 어느 쪽에서도 근거가 아니고 `used_context` 판단에만 쓴다. 값은 `sessions.config.basis`에 남는다.
+   - **근거 범위(`basis`)**: 질문이 답할 수 있어야 하고 판정·힌트·복붙 감지·인출이 기준으로 삼는 텍스트다. 사용성 테스트(실험 모드 아님)는 `mission`(학생이 읽는 앞·핵심·뒤 청크 전체)이고, 질문은 미션을 시작할 때 이 글을 보고 만든다(`make-question`, 2026-11-23). 효과성 검증(실험 모드)은 A/B가 같은 고정 질문 세트와 같은 기준을 써야 하므로 항상 `excerpt`(고른 1~3문장)다. 값은 `sessions.config.basis`에 남는다. `chunk`는 이전 세션 호환용이다.
    - 세션마다 `missions`(학생에게 보임, 제공 청크 `context_ids` 포함)와 `mission_secrets`(판정 기준)로 나눠 저장한다.
 3. **미션 진행** (`submit-answer`, 프롬프트 v0.5 1-5·1-6절): 미션은 순서대로만 진행한다.
    - 힌트는 학생이 요청할 때만 준다(`action: 'hint'`). 자동으로 주지 않는다. 한 번에 한 단계씩 1(볼 관점) → 2(위치 + 원문 인용 1~2문장, 인용문은 서버가 원문에서 꺼냄) → 3(대비 구조 설명). 정답 문장은 쓰지 않고, 판정 기준을 그대로 담은 힌트는 서버가 걸러 대체 문구로 바꾼다.
@@ -175,7 +175,7 @@ flowchart LR
 - service role 함수는 RLS를 우회하므로 호출 때마다 접근 권한을 직접 확인한다: 자료 소유자이거나 `sources.shared`인 자료만 쓴다. (`plan-session`에 구현)
 - `question_sets.plan`에는 판정 기준(key_points)이 있으므로 `mission_secrets`처럼 클라이언트 접근을 전부 막았다.
 - 비밀값: `GEMINI_API_KEY`, `GEMINI_MODEL`은 `supabase secrets`로만 설정한다. 저장소에 두지 않는다. (`.gitignore`에 `.env` 포함)
-- 단계별 모델(2026-11-18): `GEMINI_MODEL_PLAN`(읽기 계획 생성), `GEMINI_MODEL_JUDGE`(판정·힌트·보완)은 선택 비밀값이다. 없으면 `GEMINI_MODEL`을 쓰고, 인출·연결은 항상 `GEMINI_MODEL`이다(`llm.ts`의 `modelFor`). 예비 모델(`GEMINI_FALLBACK_MODELS`)은 단계와 관계없이 같다. `sessions.model`에는 `plan:… judge:… light:…`로 기록된다.
+- 단계별 모델(2026-11-18): `GEMINI_MODEL_PLAN`(읽기 계획 생성), `GEMINI_MODEL_JUDGE`(판정·힌트·보완)은 선택 비밀값이다. 없으면 `GEMINI_MODEL`을 쓰고, 인출·연결은 항상 `GEMINI_MODEL`이다(`llm.ts`의 `modelFor`). 예비 모델(`GEMINI_FALLBACK_MODELS`)은 단계와 관계없이 같다. `sessions.summary.model`에는 `plan:… judge:… light:…`로 기록된다.
 - 동의 2종: `consent_research`(횟수·점수 요약 익명 저장), `consent_answers`(답변 원문 저장). 후자가 아니면 답변 원문과 과제 안내문을 저장하지 않는다.
 - 외부 LLM 전송: 자료와 답변이 Gemini로 전송된다. **학습 조항 포함 여부를 동의서에 쓰고 IRB 담당자에게 확인**하기로 한 기존 결정이 이 구조에도 그대로 적용된다.
 
@@ -226,3 +226,14 @@ npx supabase functions deploy ingest-source plan-session submit-answer report-qu
 2. (확정·반영) 분량 상한 단위는 청크, B = 핵심 + 앞뒤 1개. (6절)
 3. 임베딩을 영어 모델로 갈지, 한국어 대응 모델로 바꿀지? (교재가 영어라면 현재 설정으로 시작 가능)
 4. 세션 로그의 `prompt_version`: 앱이 만든 로그에도 `v0.5-chat`을 쓰는 것이 맞는가, 별도 표기(`v0.5-app`)가 나은가? (현재는 eval 검사기와 맞추기 위해 `v0.5-chat`)
+
+
+## 질문 단계·근거 문장·판정 로그 (2026-11-23)
+
+- **학습자가 난이도를 고르지 않는다.** 질문 단계는 과제 요구 항목의 유형이 정하는 시작 단계에서 출발해 미션 사이에서만 움직인다(미션 안에서는 바뀌지 않는다).
+  - 단계(코드 depth 0/1/2 = 화면 1/2/3단계): 1 정리(한 청크 안 문장 2~3개를 묶기) / 2 추론(서로 다른 청크를 이어 글에 없는 결론) / 3 평가(주장·근거를 따져 판단·적용).
+  - 유형별 시작·범위(`core.ts LEVEL_RANGE`): 정보 정리 = 1단계 시작, 최대 2단계 / 분석·설명 = 2단계 시작, 최대 3단계 / 의견·평가 = 2단계 시작, 최대 3단계. 모든 유형이 1단계까지 내려갈 수 있다.
+  - 이동 규칙(`levelDepth`): 도움 없이 한 번에 통과하면 +1, 힌트 2단계 이상이거나 미해결이면 −1. 새 요구 항목의 첫 미션은 그 유형의 시작 단계로 다시 시작한다. 의견형 항목의 마지막 미션은 힘들어하지 않았다면 최상위로 올린다. 전체의 마지막 미션은 최소 2단계다. 요구 유형은 계획 LLM의 `req_types`를 쓰고 값이 없거나 틀리면 `classifyReq` 규칙(의견 > 분석 > 정보)으로 가른다.
+- **질문은 미션 시작 때 만든다**(`make-question`, 사용성 테스트만). 계획은 읽을 곳(요구 항목, 핵심 청크)만 정하고(`PlanData.lazy`), 질문·핵심 요소·핵심 요소별 근거 문장 번호는 학생이 읽을 글 전체를 보고 만든다. 효과성 검증은 A/B 동일 조건을 위해 계획 때 고정 세트를 만든다(근거 필수 규칙도 적용하지 않는다).
+- **근거 문장은 필수다**(사용성 테스트, 2문장 이상, `minEvidence`). 판정(`verdict`)은 답으로만 하고 근거 적합도(`evidence_fit` good/partial/off)는 따로 기록한다. 질문을 만들 때 단 핵심 근거 번호와의 겹침(`evidenceFit`)이 있으면 그것을, 없으면 판정 모델의 값을 쓴다. 답은 pass인데 근거가 off이면 첫 답은 보완으로 보내고 보완 뒤에는 기록만 하고 통과시킨다(`answerOutcome`).
+- **판정 로그**: `turns`(kind = answer/hint/recall/connect)가 원본이고 `events`는 보조 기록이다. 세션이 끝나면 `finish-session`이 turns에서 요약을 만들어 `sessions.summary`(jsonb)에 저장한다. 답변 원문(`answer`)은 `consent_answers`가 있을 때만 turns에 저장된다. 새 필드: `level_path`(미션별 질문 단계), `req_type`, `evidence_fit`, `chunks_used`(답이 종합한 청크 수), turns payload의 `level`·`evidence_chunks`.

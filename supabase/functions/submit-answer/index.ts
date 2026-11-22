@@ -1,6 +1,8 @@
 // POST /submit-answer
 // 입력: { session_id, mission_idx, action: 'answer' | 'hint', qtype, answer?, evidence? }
-//   evidence: 학생이 원문에서 눌러 고른 근거 문장 번호(화면에 보인 앞·핵심·뒤 문단 전체에 이어 붙인 1부터 번호, 최대 5개). 선택 사항이며 판정에는 쓰지 않고 기록만 한다(로그의 evidence_cited, 결과표의 근거 문장 수).
+//   evidence: 학생이 원문에서 눌러 고른 근거 문장 번호(화면에 보인 앞·핵심·뒤 문단 전체에 이어 붙인 1부터 번호, 최대 5개).
+//     사용성 테스트(config.lazy)에서는 필수다(2문장 이상). 판정(verdict)은 답으로만 하고, 근거가 질문의 핵심 근거와 맞는지는 evidence_fit(good/partial/off)로 따로 기록한다.
+//     답은 pass인데 근거가 off이면 첫 답은 보완으로 보내고, 보완 뒤에는 기록만 하고 통과시킨다. 효과성 검증(experiment)은 A/B 동일 조건을 위해 선택 사항으로 둔다.
 //   answer: 학생 답변 제출. 복붙이면 다시 쓰게 하고, 아니면 판정(pass/partial/fail)한다.
 //   hint:   학생이 막혀서 요청했을 때만. 서버가 자동으로 주지 않는다. 한 번에 한 단계씩 1 → 2 → 3.
 // 규칙(프롬프트 v0.5 1-5, 1-6절):
@@ -14,9 +16,11 @@
 // 클라이언트는 응답이 올 때까지 제출 버튼을 막아야 한다.
 // 판정은 조건(A/B)과 무관하게 핵심 발췌 + key_points만으로 한다. 복붙 감지도 핵심 발췌와 비교해, B의 추가 텍스트가 감지 기준을 바꾸지 않게 한다.
 import {
-  answerOutcome, basisPick, currentMission, isCopy, leaksKey, MAX_HINT, missionState, pickQtype, QTYPES, resolvePick, sentenceNums,
-  supportBefore, type Basis, type Chunk, type FlowOpts, type Pick, type QType, type Verdict,
+  answerOutcome, basisPick, chunksTouched, currentMission, evidenceFit, EVIDENCE_FITS, isCopy, leaksKey, LEVEL_RANGE, levelInfos, MAX_HINT,
+  minEvidence, missionState, pickQtype, QTYPES, resolvePick, sentenceNums, supportBefore, windowLocation, windowNums,
+  type Basis, type Chunk, type EvidenceFit, type FlowOpts, type Pick, type QType, type Verdict, type Win,
 } from '../_shared/core.ts';
+import { loadWindow } from '../_shared/window.ts';
 import { authedUser, corsHeaders, json, serviceClient } from '../_shared/http.ts';
 import { askJson, LlmError } from '../_shared/llm.ts';
 import { buildHintPrompt, buildJudgePrompt } from '../_shared/prompts.ts';
@@ -71,6 +75,9 @@ Deno.serve(async (req) => {
   ]);
   const mission = (missions ?? []).find((m) => m.idx === mission_idx);
   if (!mission) return json({ error: 'not_found', message: '없는 미션입니다' }, 404);
+  if (!(mission.variants as unknown[]).length) {
+    return json({ error: 'question_not_ready', message: '이 미션의 질문이 아직 만들어지지 않았습니다(make-question을 먼저 호출하세요)' }, 409);
+  }
   if (!(mission.variants as { qtype: string }[]).some((v) => v.qtype === qtype)) {
     return json({ error: 'bad_request', message: '이 미션에 없는 질문 유형입니다' }, 400);
   }
@@ -83,33 +90,54 @@ Deno.serve(async (req) => {
   const state = missionState(history, mission_idx);
   if (state.qtype && state.qtype !== qtype) return json({ error: 'qtype_mismatch', expected: state.qtype }, 409);
 
-  // 3) 핵심 발췌 (A 기준). 판정·힌트·복붙 감지는 모두 이 텍스트를 기준으로 한다.
+  // 3) 읽은 글. lazy(사용성 테스트)는 학생이 읽은 앞·핵심·뒤 청크 전체(Win)가 근거 범위이고, 그 밖에는 핵심 발췌(A 기준)다.
+  const cfg0 = (ses.config ?? {}) as { lazy?: boolean; reqs?: string[]; req_types?: unknown };
+  const lazy = cfg0.lazy === true;
   const basis = ((ses.config as { basis?: Basis } | null)?.basis) ?? 'excerpt';
   const picked = (mission.picks as Pick[])[0];
   const { data: coreRow } = await db
     .from('chunks').select('id, sec, sentences').eq('source_id', ses.source_id).eq('id', picked[0]).maybeSingle();
   if (!coreRow) return json({ error: 'chunk_missing' }, 500);
   const core: Chunk = { id: coreRow.id, sec: coreRow.sec, s: coreRow.sentences, t: (coreRow.sentences as string[]).join(' ') };
-  // 근거 범위 밖의 번호, 중복, 6번째 이후는 버린다. 선택은 비어 있어도 된다.
-  // 화면은 앞 문단·핵심 문단·뒤 문단의 문장에 이어서 번호를 붙이고 구분 없이 고르게 한다. 그래서 상한은 보여 준 문단 전체의 문장 수다.
-  const ctxIds = ((mission.context_ids as string[]) ?? []).filter((id) => id !== core.id);
-  let shownSentences = core.s.length;
-  if (ctxIds.length) {
-    const { data: ctxRows } = await db.from('chunks').select('sentences').eq('source_id', ses.source_id).in('id', ctxIds);
-    shownSentences += (ctxRows ?? []).reduce((n, r) => n + ((r.sentences as string[])?.length ?? 0), 0);
+  let win: Win | null = null;
+  if (lazy) {
+    const loaded = await loadWindow(db, ses.source_id, (mission.context_ids as string[]) ?? [core.id]);
+    if (!loaded) return json({ error: 'chunk_missing' }, 500);
+    win = loaded.win;
   }
-  const evidence: number[] = [...new Set<number>((body?.evidence ?? []).map((n: unknown) => Math.round(Number(n))))]
-    .filter((n) => n >= 1 && n <= shownSentences).sort((a, b) => a - b).slice(0, 5);
-  const pick = basisPick(basis, picked, core.s.length); // 근거 범위: excerpt면 고른 문장, chunk면 핵심 청크 전체
+  // 근거 범위 밖의 번호, 제목, 중복, 6번째 이후는 버린다. 화면은 앞·핵심·뒤 문단의 문장에 이어서 번호를 붙이고 구분 없이 고르게 한다.
+  let shownSentences = core.s.length;
+  if (!lazy) {
+    const ctxIds = ((mission.context_ids as string[]) ?? []).filter((id) => id !== core.id);
+    if (ctxIds.length) {
+      const { data: ctxRows } = await db.from('chunks').select('sentences').eq('source_id', ses.source_id).in('id', ctxIds);
+      shownSentences += (ctxRows ?? []).reduce((n, r) => n + ((r.sentences as string[])?.length ?? 0), 0);
+    }
+  }
+  const evidence: number[] = win
+    ? windowNums(body?.evidence, win, 5)
+    : [...new Set<number>((body?.evidence ?? []).map((n: unknown) => Math.round(Number(n))))].filter((n) => n >= 1 && n <= shownSentences).sort((a, b) => a - b).slice(0, 5);
+  if (win && action === 'answer' && evidence.length < minEvidence(win)) {
+    return json({ error: 'evidence_required', min: minEvidence(win), message: `근거 문장을 ${minEvidence(win)}개 이상 골라 주세요` }, 400);
+  }
+  const pick: Pick = win ? [core.id, 1, win.sentences.length] : basisPick(basis, picked, core.s.length); // 근거 범위: excerpt면 고른 문장, chunk면 핵심 청크 전체, mission이면 읽은 글 전체
   const byId = { [core.id]: core };
-  const coreView = { sentences: core.s.slice(pick[1] - 1, pick[2]), from: pick[1] };
+  const coreView = win ? { sentences: win.sentences, from: 1 } : { sentences: core.s.slice(pick[1] - 1, pick[2]), from: pick[1] };
   const coreText = coreView.sentences.join(' ');
+  // 힌트·보완이 가리키는 위치 문구 (화면에 보이는 번호와 같다)
+  const where = (nums: number[]) => {
+    if (win) return windowLocation(win, nums);
+    const r = resolvePick(byId, [core.id, nums[0], nums[nums.length - 1]]);
+    return `${r.sec} · ${r.id} · ${nums.length === 1 ? `문장 ${nums[0]}` : `문장 ${nums.join(', ')}`}`;
+  };
 
   const variant = (mission.variants as { qtype: string; question: string }[]).find((v) => v.qtype === qtype)!;
   const { data: secret } = await db
     .from('mission_secrets').select('key_points').eq('session_id', session_id).eq('idx', mission_idx).maybeSingle();
-  const keys: string[] = (secret?.key_points as Record<string, string[]> | undefined)?.[qtype] ?? [];
-  const reqText = (ses.config as { reqs?: string[] } | null)?.reqs?.[mission.req - 1] ?? '';
+  const kp = secret?.key_points as (Record<string, string[]> & { _ev?: Record<string, number[][]> }) | undefined;
+  const keys: string[] = kp?.[qtype] ?? [];
+  const keyEv: number[][] | undefined = kp?._ev?.[qtype]; // 핵심 요소별 근거 문장 번호(판정 기준. 학생에게 공개하지 않는다)
+  const reqText = cfg0.reqs?.[mission.req - 1] ?? '';
 
   const t = Math.round(((Date.now() - new Date(ses.started_at).getTime()) / 1000) * 10) / 10;
   const record = async (payload: Record<string, unknown>, kind: 'answer' | 'hint') => {
@@ -141,9 +169,8 @@ Deno.serve(async (req) => {
       if (level === 2) {
         // 인용문은 LLM이 쓴 글이 아니라 서버가 원문에서 꺼낸다. 위치만 알려 주고 끝내지 않는다.
         sentences = sentenceNums(pick, data?.sentences, 2);
-        const r = resolvePick(byId, [core.id, sentences[0], sentences[sentences.length - 1]]);
-        location = `${r.sec} · ${r.id} · ${sentences.length === 1 ? `문장 ${sentences[0]}` : `문장 ${sentences.join(', ')}`}`;
-        quote = sentences.map((n) => core.s[n - 1]).join(' ');
+        location = where(sentences);
+        quote = sentences.map((n) => (win ? win.sentences[n - 1] : core.s[n - 1])).join(' ');
         text = '이 부분을 다시 읽어 보세요.';
       } else {
         text = str(data?.text, 400);
@@ -159,13 +186,14 @@ Deno.serve(async (req) => {
     const err = await record({ qtype, level, text, ...(sentences ? { sentences } : {}) }, 'hint');
     if (err) return json({ error: 'db_error', message: err.message }, 500);
     await event('hint_given', { level });
-    return json({ action: 'hint', level, hint_level: level, hints_left: MAX_HINT - level, text, location, quote });
+    return json({ action: 'hint', level, hint_level: level, hints_left: MAX_HINT - level, text, location, quote, ...(win && sentences ? { sentences } : {}) });
   }
 
   /* ---------- 답변 ---------- */
   const stored = ses.consent_answers ? { answer } : {}; // 답변 원문은 동의한 경우에만 저장한다
   const total = missions!.length;
   const cfg = (ses.config ?? {}) as { fade?: boolean; adaptDepth?: boolean };
+  const levels = levelInfos(missions!, cfg0.reqs ?? [], cfg0.req_types);
   const flow: FlowOpts = { fade: cfg.fade === true, adaptDepth: cfg.adaptDepth === true };
 
   if (isCopy(answer, coreText)) {
@@ -178,7 +206,7 @@ Deno.serve(async (req) => {
   // 조건 B: 앞뒤 맥락은 context_used 판단에만 쓴다. 판정에는 반영하지 않는다.
   let context: string | undefined;
   const extra = ((mission.context_ids as string[]) ?? []).filter((id) => id !== core.id);
-  if (ses.condition === 'B' && extra.length) {
+  if (!lazy && ses.condition === 'B' && extra.length) {
     const { data: rows } = await db.from('chunks').select('id, idx, sentences').eq('source_id', ses.source_id).in('id', extra);
     context = (rows ?? []).sort((a, b) => a.idx - b.idx).map((r) => (r.sentences as string[]).join(' ')).join('\n');
   }
@@ -189,11 +217,14 @@ Deno.serve(async (req) => {
   let recheckNums: unknown;
   let evidenceCited = false;
   let usedContext = false;
+  let llmFit: EvidenceFit | null = null;
+  let chunksUsed: number | null = null;
   try {
     const d = await askJson(
       buildJudgePrompt({
-        req: reqText, qtype: qtype as QType, question: variant.question, keys, core: coreView, context, answer,
+        req: reqText, qtype: qtype as QType, question: variant.question, keys, keyEv, core: coreView, context, answer,
         revision: state.attempts > 0,
+        ...(win ? { spans: win.spans, evidence: evidence.map((n) => ({ n, text: win!.sentences[n - 1] })) } : {}),
       }),
       undefined,
       'judge',
@@ -205,16 +236,25 @@ Deno.serve(async (req) => {
     recheckNums = d.recheck;
     evidenceCited = d.evidence_cited === true;
     usedContext = !!context && d.used_context === true;
+    if (win) {
+      llmFit = EVIDENCE_FITS.includes(d.evidence_fit) ? d.evidence_fit : null;
+      const cu = Math.round(Number(d.chunks_used));
+      chunksUsed = Number.isFinite(cu) ? Math.max(0, Math.min(win.spans.length, cu)) : null;
+    }
   } catch (e) {
     return llmFail(e); // 판정이 없으면 기록하지 않는다. 학생은 같은 답을 다시 제출할 수 있다.
   }
 
   const attemptsBefore = state.attempts;
-  const outcome = answerOutcome(attemptsBefore, verdict);
+  // 근거 적합도: 질문을 만들 때 단 핵심 근거 번호와의 겹침이 있으면 그것을 쓰고(결정적), 없으면 판정 모델의 값을 쓴다.
+  const fit: EvidenceFit | null = win ? (evidenceFit(evidence, keyEv) ?? llmFit) : null;
+  const evidenceChunks = win ? chunksTouched(win, evidence) : null;
+  const outcome = answerOutcome(attemptsBefore, verdict, fit);
   const stage = attemptsBefore === 0 ? 'first' : 'revision';
   const payload = {
     qtype, stage, copy: false, verdict, outcome, evidence_cited: evidenceCited || evidence.length > 0, evidence, used_context: usedContext,
     hints_before: state.hintLevel, len: answer.length, ...stored,
+    ...(win ? { evidence_fit: fit, chunks_used: chunksUsed, evidence_chunks: evidenceChunks, level: QTYPES.indexOf(qtype as QType) + 1 } : {}),
   };
   const err = await record(payload, 'answer');
   if (err) return json({ error: 'db_error', message: err.message }, 500);
@@ -226,15 +266,19 @@ Deno.serve(async (req) => {
   let nextSupport: { sup: number; depth: number; qtype: QType } | null = null;
   if (next !== null) {
     const after = [...history, { mission_idx, kind: 'answer', payload }];
-    const from = supportBefore(history, mission_idx, flow);
-    const to = supportBefore(after, next, flow);
+    const from = supportBefore(history, mission_idx, flow, levels);
+    const to = supportBefore(after, next, flow, levels);
     const qtypes = ((missions!.find((m) => m.idx === next)!.variants as { qtype: QType }[]) ?? []).map((v) => v.qtype);
-    nextSupport = { ...to, qtype: pickQtype(qtypes, to.depth, { adaptDepth: flow.adaptDepth, last: next === total - 1 }) };
+    // lazy: 다음 질문은 시작할 때 만들어지므로 단계(depth)에 맞는 유형만 알려 준다. 그 밖에는 만들어 둔 변형 중에서 고른다.
+    nextSupport = { ...to, qtype: lazy ? QTYPES[to.depth] : pickQtype(qtypes, to.depth, { adaptDepth: flow.adaptDepth, last: next === total - 1, maxDepth: LEVEL_RANGE[levels[next].type].max }) };
     await event('support_changed', {
       from: from.sup, to: to.sup, depthFrom: from.depth, depthTo: to.depth, hints: state.hintLevel, revised: stage === 'revision',
     });
   }
-  const base = { action: 'answer', outcome, verdict, hint_level: state.hintLevel, evidence_cited: evidenceCited || evidence.length > 0, evidence };
+  const base = {
+    action: 'answer', outcome, verdict, hint_level: state.hintLevel, evidence_cited: evidenceCited || evidence.length > 0, evidence,
+    ...(win ? { evidence_fit: fit } : {}),
+  };
 
   if (outcome === 'passed') {
     await event('mission_passed', { stage, hints: state.hintLevel });
@@ -244,11 +288,15 @@ Deno.serve(async (req) => {
 
   if (outcome === 'revise') {
     // 정답은 알려 주지 않고 다시 확인할 위치만 안내한다.
-    const nums = sentenceNums(pick, recheckNums, 3);
-    const r = resolvePick(byId, [core.id, nums[0], nums[nums.length - 1]]);
-    const safeGap = leaksKey(gap, keys) ? '' : gap;
-    await event('revision_requested', { verdict });
-    return json({ ...base, praise, gap: safeGap, recheck: { location: `${r.sec} · ${r.id} · ${r.range}` }, next_mission: null, all_done: false });
+    // 답은 pass인데 근거가 어긋나 보완으로 온 경우: 답은 인정하되 고른 근거를 다시 보게 한다(어느 문장이 맞는지는 알려 주지 않는다).
+    const evidenceOnly = verdict === 'pass' && fit === 'off';
+    const nums = evidenceOnly ? evidence : sentenceNums(pick, recheckNums, 3);
+    const safeGap = evidenceOnly
+      ? '답은 잘 썼어요. 다만 고른 근거 문장이 답의 핵심과 잘 맞지 않아 보여요. 답을 뒷받침하는 문장을 다시 골라 보세요.'
+      : (leaksKey(gap, keys) ? '' : gap);
+    await event('revision_requested', { verdict, ...(evidenceOnly ? { evidence_fit: fit } : {}) });
+    const loc = evidenceOnly ? '' : where(nums);
+    return json({ ...base, praise, gap: safeGap, recheck: loc ? { location: loc } : undefined, next_mission: null, all_done: false });
   }
 
   // unresolved: 보완 뒤에도 부족하면 핵심 요점을 짧게 보여 주고 다음으로 넘어간다.
