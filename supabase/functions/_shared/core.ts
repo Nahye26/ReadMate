@@ -123,6 +123,12 @@ export function splitWithHeads(text: string): { t: string; head: boolean }[] {
   return out;
 }
 
+// DB(Postgres text/jsonb)에 저장할 수 없는 문자를 걸러낸다. NUL(\u0000)이 하나라도 있으면 "unsupported Unicode escape sequence"로 저장이 통째로 실패하고,
+// 짝이 맞지 않는 서로게이트도 jsonb(sentences)에서 오류가 난다. pdf.js는 글꼴에 없는 글리프에서 이런 문자를 내보낼 수 있다.
+// 줄바꿈·탭 같은 공백 문자는 그대로 둔다(뒤 단계가 공백으로 합친다). web/pdfclean.mjs의 stripUnsafe와 같은 규칙이다.
+const UNSAFE_CHARS = /[\u0000-\u0008\u000E-\u001F\u007F]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+export const stripUnsafe = (s: string): string => s.replace(UNSAFE_CHARS, '');
+
 // carry를 다음 배치 첫 섹션 맨 앞에 붙인다. 그 섹션이 JOIN_MARK로 시작하면 공백 없이 붙인다.
 export function prependCarry(carry: string, text: string): string {
   if (!carry) return text;

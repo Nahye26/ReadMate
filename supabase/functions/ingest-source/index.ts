@@ -10,7 +10,7 @@
 // 동작: 문단 단위로 청킹 → 청크 임베딩(Gemini API 배치 호출) → sources / chunks 저장
 // 출력: { source_id, chunks, next_idx }   (chunks: 이번 호출에서 저장한 수, next_idx: 다음 호출의 idx_start)
 // 같은 호출을 다시 보내도 안전하다(같은 청크 ID는 덮어쓴다). 클라이언트는 실패한 배치만 다시 보낸다.
-import { buildChunksFromSections, prependCarry, withholdTail, type Chunk } from '../_shared/core.ts';
+import { buildChunksFromSections, prependCarry, stripUnsafe, withholdTail, type Chunk } from '../_shared/core.ts';
 import { EmbedError, embedMany, toVector } from '../_shared/embed.ts';
 import { authedUser, corsHeaders, json, serviceClient } from '../_shared/http.ts';
 
@@ -39,11 +39,11 @@ Deno.serve(async (req) => {
   if (!create && (!Array.isArray(sections) || !sections.length)) return json({ error: 'bad_request', message: 'sections가 필요합니다' }, 400);
   if (!append && (typeof title !== 'string' || !title.trim())) return json({ error: 'bad_request', message: 'title이 필요합니다' }, 400);
 
-  const carryIn = typeof body?.carry === 'string' ? body.carry.slice(0, 2000) : '';
+  const carryIn = typeof body?.carry === 'string' ? stripUnsafe(body.carry.slice(0, 2000)) : '';
   const last = body?.last !== false; // 생략하면 마지막 배치로 본다(이월 없이 남김없이 저장)
   let secs: { sec: string; text: string }[] = create
     ? []
-    : sections.map((s: any, i: number) => ({ sec: String(s?.sec ?? `본문 ${sectionOffset + i + 1}`), text: String(s?.text ?? '') }));
+    : sections.map((s: any, i: number) => ({ sec: stripUnsafe(String(s?.sec ?? `본문 ${sectionOffset + i + 1}`)), text: stripUnsafe(String(s?.text ?? '')) }));
   if (carryIn && secs.length) secs[0] = { ...secs[0], text: prependCarry(carryIn, secs[0].text) };
   let carryOut = '';
   if (!last && secs.length) ({ sections: secs, carry: carryOut } = withholdTail(secs));
@@ -68,7 +68,7 @@ Deno.serve(async (req) => {
   } else {
     const { data: source, error: srcErr } = await db
       .from('sources')
-      .insert({ owner: user.id, title: title.trim().slice(0, 200), lang: lang === 'ko' || lang === 'en' ? lang : null, pages: Number.isInteger(pages) ? pages : null })
+      .insert({ owner: user.id, title: stripUnsafe(title.trim().slice(0, 200)), lang: lang === 'ko' || lang === 'en' ? lang : null, pages: Number.isInteger(pages) ? pages : null })
       .select('id')
       .single();
     if (srcErr || !source) return json({ error: 'db_error', message: srcErr?.message }, 500);

@@ -15,6 +15,11 @@ export const HEAD_OPEN = '';
 export const HEAD_CLOSE = '';
 export const JOIN = ''; // 쪽 텍스트 맨 앞에 붙으면 앞 쪽과 공백 없이 이어진다(쪽 경계에서 어절이 끊긴 경우)
 
+// DB에 저장할 수 없는 문자(NUL, 짝 없는 서로게이트, 제어 문자)를 지운다. 하나라도 남으면 서버 저장이 "unsupported Unicode escape sequence"로 실패한다.
+// 공백 문자(줄바꿈·탭)는 그대로 둔다. supabase/functions/_shared/core.ts의 stripUnsafe와 같은 규칙이다.
+const UNSAFE_CHARS = /[\u0000-\u0008\u000E-\u001F\u007F]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+export const stripUnsafe = (s) => String(s ?? '').replace(UNSAFE_CHARS, '');
+
 const TOP = 0.2;
 const BOTTOM = 0.15;
 const FOOT_ZONE = 0.35; // 쪽 아래쪽 35% 안의 작은 글자 줄을 각주로 본다
