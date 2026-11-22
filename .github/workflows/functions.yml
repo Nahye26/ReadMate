@@ -26,4 +26,4 @@ jobs:
         with:
           version: latest
       - name: Deploy all functions
-        run: supabase functions deploy --project-ref "$PROJECT_REF"
+        run: supabase functions deploy --project-ref "$PROJECT_REF" --yes # 최신 CLI는 배포 전 확인을 묻는다. 자동 실행에서는 답할 수 없어 --yes가 필요하다
