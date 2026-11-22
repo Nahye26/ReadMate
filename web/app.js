@@ -2,7 +2,7 @@
 // 서버 함수: ingest-source → plan-session → submit-answer / report-question → recall → connect → finish-session
 // 서버가 상태의 기준이다(진행 순서, 힌트·보완 횟수, 다음 안내 수준). 이 파일은 화면과 호출만 맡는다.
 // 새로고침하면 화면 상태는 사라진다(서버에 세션을 다시 불러오는 함수는 아직 없다).
-import { SUPABASE_URL, SUPABASE_ANON_KEY, CONDITION } from './config.js';
+import { SUPABASE_URL, SUPABASE_ANON_KEY, CONDITION, PAPERS } from './config.js';
 import { cleanPages, imageRectsFromOps, stripUnsafe, HEAD_OPEN, HEAD_CLOSE } from './pdfclean.mjs';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
@@ -26,7 +26,7 @@ const EXIT_REASONS = ['너무 어려워요', '시간이 없어요', '내용이 �
 const sb = SUPABASE_ANON_KEY ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
 
 const S = {
-  screen: 'start', assignment: '', file: null, source: null, // source: {id, title, pages, shared}
+  screen: 'start', assignment: '', file: null, source: null, paperKey: null, // source: {id, title, pages, shared}. paperKey: 목록에서 고른 자료의 key('upload'이면 PDF 직접 올리기)
   consentResearch: false, consentAnswers: false,
   plan: null, mi: 0, support: null, qtype: null, rec: [], ui: null,
   recallRes: null, recallStage: null, connect: null, connectOffered: false, load: 0, finished: false, error: null,
@@ -115,6 +115,11 @@ function errBox(e, retryId) {
 function startScreen() {
   S.screen = 'start';
   const shared = params.get('source');
+  const papers = shared ? [] : PAPERS.filter((p) => p.sourceId); // 목록에 둘 자료(sourceId가 있는 것만). 없으면 PDF 업로드만 보인다
+  const pickingPaper = papers.some((p) => p.key === S.paperKey);
+  const paperList = papers.length
+    ? `<div class="papers" role="radiogroup" aria-label="읽을 자료">${papers.map((p) => `<label class="consent paper"><input type="radio" name="paper" value="${esc(p.key)}" ${S.paperKey === p.key ? 'checked' : ''}><span><b>${esc(p.key)}.</b> ${esc(p.label)}</span></label>`).join('')}<label class="consent paper"><input type="radio" name="paper" value="upload" ${S.paperKey === 'upload' ? 'checked' : ''}><span>내 PDF 직접 올리기</span></label></div>`
+    : '';
   const fileBox = shared
     ? `<div class="file has"><span class="tag">PDF</span><div class="meta"><div class="name">연구자가 제공한 자료</div></div></div>`
     : S.file
@@ -125,7 +130,7 @@ function startScreen() {
     <label class="lbl" for="asg">과제 안내문</label>
     <textarea id="asg" rows="5" placeholder="예: 추천 시스템에서 인기 편향이 생기는 원인과 줄이려는 방법, 그 한계를 정리하세요.">${esc(S.assignment)}</textarea>
     <div class="hint-text">요구 분량과 필요한 항목을 함께 붙여 넣으면 더 잘 맞는 읽기 계획이 나와요.</div>
-    <label class="lbl">읽을 자료</label>${fileBox}
+    <label class="lbl">읽을 자료</label>${paperList}${pickingPaper || (papers.length && S.paperKey !== 'upload') ? '' : fileBox}
     <input class="sr" type="file" id="file" accept="application/pdf">
     <div style="margin-top:20px">
       <label class="consent"><input type="checkbox" id="c1" ${S.consentResearch ? 'checked' : ''}><span>요약 로그(횟수·점수)를 익명으로 연구에 사용하는 것에 동의합니다.</span></label>
@@ -135,12 +140,17 @@ function startScreen() {
     <button class="btn primary" id="go" type="button" style="width:100%;margin-top:12px">읽기 계획 만들기</button>
   </div>`, { noSteps: true });
   $('#pick')?.addEventListener('click', () => $('#file').click());
+  document.querySelectorAll('input[name=paper]').forEach((r) => r.addEventListener('change', () => {
+    S.assignment = $('#asg').value; S.consentResearch = $('#c1').checked; S.consentAnswers = $('#c2').checked;
+    S.paperKey = r.value; S.source = null; S.error = null; startScreen(); // 다른 자료를 고르면 앞서 만든 자료·업로드 파일 연결을 풀어 새로 시작한다
+  }));
   $('#file').addEventListener('change', (e) => { S.file = e.target.files[0] || null; S.source = null; S.assignment = $('#asg').value; startScreen(); });
   const sync = () => { S.assignment = $('#asg').value; S.consentResearch = $('#c1').checked; S.consentAnswers = $('#c2').checked; };
   const go = () => {
     sync();
     if (!S.assignment.trim()) { S.error = { message: '과제 안내문을 입력해 주세요.' }; return startScreen(); }
-    if (!shared && !S.file && !S.source) { S.error = { message: '읽을 PDF를 선택해 주세요.' }; return startScreen(); }
+    if (papers.length && !S.paperKey) { S.error = { message: '읽을 자료를 선택해 주세요.' }; return startScreen(); }
+    if (!shared && !pickingPaper && !S.file && !S.source) { S.error = { message: '읽을 PDF를 선택해 주세요.' }; return startScreen(); }
     makePlan();
   };
   $('#go').addEventListener('click', go);
@@ -237,7 +247,9 @@ async function makePlan() {
   S.error = null;
   try {
     const sharedId = params.get('source');
+    const paper = sharedId ? null : PAPERS.find((p) => p.sourceId && p.key === S.paperKey);
     if (sharedId) S.source = { id: sharedId, title: '연구자가 제공한 자료', shared: true };
+    else if (paper) S.source = { id: paper.sourceId, title: paper.short, shared: true }; // 올려 둔 자료를 그대로 쓴다(다시 올리거나 임베딩하지 않는다)
     if (!S.source) {
       S.source = await withBusy('자료를 읽는 중이에요…', async () => {
         const pdf = await readPdf(S.file);
@@ -248,7 +260,7 @@ async function makePlan() {
     }
     S.plan = await withBusy('읽기 계획을 만드는 중이에요. 30초 정도 걸릴 수 있어요…', () => call('plan-session', {
       source_id: S.source.id, assignment: S.assignment.trim(), condition: CONDITION, experiment: false,
-      researcher: params.get('researcher') || undefined, paper_id: params.get('paper') || undefined,
+      researcher: params.get('researcher') || undefined, paper_id: params.get('paper') || (paper ? paper.key : undefined),
       consent_research: S.consentResearch, consent_answers: S.consentAnswers,
     }));
     S.rec = S.plan.missions.map(() => ({ hint: 0, revised: false, evidence: 0, outcome: null }));
