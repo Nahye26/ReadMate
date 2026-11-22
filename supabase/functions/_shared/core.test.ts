@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert';
 import { createRequire } from 'node:module';
 import {
-  splitSentences, splitWithHeads, withholdTail, isNoiseSentence, HEAD_OPEN, HEAD_CLOSE, buildChunks, buildChunksFromSections, CHUNK_CONFIG, resolvePick, validateQuote, isCopy, cleanPlan, extractReqs, nextSupport, calibrate,
+  splitSentences, stripUnsafe, splitWithHeads, withholdTail, isNoiseSentence, HEAD_OPEN, HEAD_CLOSE, buildChunks, buildChunksFromSections, CHUNK_CONFIG, resolvePick, validateQuote, isCopy, cleanPlan, extractReqs, nextSupport, calibrate,
   summarize, EXPERIMENT_FLOW, DEFAULT_FLOW, contextIds, resolveExcerpts, estimateMins, normalizeAssignment,
   CONFIG, MAX_TEXT_UNITS, MAX_HINT, missionState, currentMission, answerOutcome, leaksKey, sentenceNums, pickQtype, supportBefore,
 } from './core.ts';
@@ -710,4 +710,20 @@ test('summarize: 요구 유형·질문 단계·근거 적합도·종합 청크 �
   assert.strictEqual(r.records[0].reqType, 'analysis');
   assert.strictEqual(r.records[0].evidenceFit, 'good');
   assert.strictEqual(r.records[0].chunksUsed, 2);
+});
+
+test('stripUnsafe: NUL·제어 문자·짝 없는 서로게이트를 지우고 정상 글자와 공백은 둔다', () => {
+  assert.equal(stripUnsafe('교\u0001육 이론\u007F'), '교육 이론');
+  assert.equal(stripUnsafe('aims\u0000to'), 'aims to'); // NUL은 공백 글리프라 공백으로
+  assert.equal(stripUnsafe('줄\n바꿈\t탭\r'), '줄\n바꿈\t탭\r');
+  assert.equal(stripUnsafe('가\uD800나\uDC00다'), '가나다'); // 짝 없는 high / low
+  assert.equal(stripUnsafe('😀 이모지'), '😀 이모지'); // 짝이 맞는 서로게이트는 유지
+  assert.equal(stripUnsafe('(김철수, 2021) \uE002'), '(김철수, 2021) \uE002'); // 제목·이음 표시(사용자 영역 문자)는 유지
+  assert.ok(!JSON.stringify(stripUnsafe('a\u0000b')).includes('\\u0000'));
+});
+
+test('stripUnsafe를 거친 텍스트는 청크·문장 어디에도 NUL이 남지 않는다', () => {
+  const chunks = buildChunksFromSections([{ sec: '1쪽', text: stripUnsafe('교육은 중요하다. 학\u0000습도 그렇다. 다음 문장이다.') }]);
+  assert.ok(chunks.length > 0);
+  for (const c of chunks) { assert.ok(!c.t.includes('\u0000')); assert.ok(c.s.every((x) => !x.includes('\u0000'))); }
 });

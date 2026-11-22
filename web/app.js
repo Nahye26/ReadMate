@@ -3,7 +3,7 @@
 // 서버가 상태의 기준이다(진행 순서, 힌트·보완 횟수, 다음 안내 수준). 이 파일은 화면과 호출만 맡는다.
 // 새로고침하면 화면 상태는 사라진다(서버에 세션을 다시 불러오는 함수는 아직 없다).
 import { SUPABASE_URL, SUPABASE_ANON_KEY, CONDITION } from './config.js';
-import { cleanPages, imageRectsFromOps, HEAD_OPEN, HEAD_CLOSE } from './pdfclean.mjs';
+import { cleanPages, imageRectsFromOps, stripUnsafe, HEAD_OPEN, HEAD_CLOSE } from './pdfclean.mjs';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
 const $ = (s, r = document) => r.querySelector(s);
@@ -174,7 +174,7 @@ async function readPdf(file) {
       const ol = await page.getOperatorList();
       images = imageRectsFromOps(ol.fnArray, ol.argsArray, lib.OPS, w, h);
     } catch (_) { /* 그림 영역 없이 진행 */ }
-    raw.push({ h, images, items: tc.items.map((it) => ({ s: it.str, x: it.transform[4], y: it.transform[5], eol: !!it.hasEOL, h: it.height, w: it.width, font: it.fontName })) });
+    raw.push({ h, images, items: tc.items.map((it) => ({ s: stripUnsafe(it.str), x: it.transform[4], y: it.transform[5], eol: !!it.hasEOL, h: it.height, w: it.width, font: it.fontName })) });
   }
   const sections = [];
   cleanPages(raw).forEach((t, i) => { if (t.trim().length > 20) sections.push({ sec: `${i + 1}쪽`, text: t }); });
@@ -242,7 +242,7 @@ async function makePlan() {
       S.source = await withBusy('자료를 읽는 중이에요…', async () => {
         const pdf = await readPdf(S.file);
         if (!pdf.sections.length) throw { code: 'empty_text' };
-        const title = S.file.name.replace(/\.pdf$/i, '');
+        const title = stripUnsafe(S.file.name.replace(/\.pdf$/i, ''));
         return await uploadSource(title, pdf);
       });
     }

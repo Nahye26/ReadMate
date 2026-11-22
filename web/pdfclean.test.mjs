@@ -1,7 +1,7 @@
 // 실행: node --test web/pdfclean.test.mjs
 import test from 'node:test';
 import assert from 'node:assert';
-import { cleanPages } from './pdfclean.mjs';
+import { cleanPages, stripUnsafe } from './pdfclean.mjs';
 
 const H = 842;
 const it = (s, y, x = 0, eol = true) => ({ s, x, y, eol });
@@ -129,4 +129,12 @@ test('쪽 경계에서 어절 중간이 끊기면 다음 쪽 맨 앞에 JOIN을 
   const out = cleanPages([p1, p2]);
   assert.ok(out[1].startsWith(JOIN), JSON.stringify(out[1]));
   assert.ok(boundaryProb !== undefined);
+});
+
+test('stripUnsafe: NUL·제어 문자·짝 없는 서로게이트를 지우고 정상 글자는 둔다', () => {
+  assert.equal(stripUnsafe('교\u0001육'), '교육');
+  assert.equal(stripUnsafe('aims\u0000to'), 'aims to');
+  assert.equal(stripUnsafe('가\uD800나\uDC00다'), '가나다');
+  assert.equal(stripUnsafe('😀 a\tb\n'), '😀 a\tb\n');
+  assert.equal(stripUnsafe(undefined), '');
 });
