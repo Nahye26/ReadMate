@@ -10,6 +10,6 @@ export const CONDITION = 'B';
 // 고른 자료는 sources.shared = true 여야 다른 사람도 쓸 수 있다: update sources set shared = true where id in ('…', '…');
 // key는 로그의 paper_id로 남는다(?paper= 주소 값이 있으면 그것이 우선한다).
 export const PAPERS = [
-  { key: 'A', sourceId: '', short: '김도희(2022) 갤러리 오픈런', label: "김도희 (2022). MZ세대의 '갤러리 오픈런' 현상에 대한 비판적 고찰. 『인문사회 21』, 13(4), 79–94." },
-  { key: 'B', sourceId: '', short: '윤소정(2021) 팬덤의 웨이브 이론', label: '윤소정 (2021). 컨버전스 시대의 팬 활동: 팬덤의 웨이브 이론을 중심으로. 『인문사회 21』, 12(4), 909–922.' },
+  { key: 'A', sourceId: 'f7d698cc-12d1-4ea0-98d5-7ae5a2f1f386', short: '김도희(2022) 갤러리 오픈런', label: "김도희 (2022). MZ세대의 '갤러리 오픈런' 현상에 대한 비판적 고찰. 『인문사회 21』, 13(4), 79–94." },
+  { key: 'B', sourceId: '7f20a1e9-ace6-4e6c-8655-02bd08c34bcb', short: '윤소정(2021) 팬덤의 웨이브 이론', label: '윤소정 (2021). 컨버전스 시대의 팬 활동: 팬덤의 웨이브 이론을 중심으로. 『인문사회 21』, 12(4), 909–922.' },
 ];
