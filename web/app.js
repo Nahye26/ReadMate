@@ -88,7 +88,13 @@ async function withBusy(msg, fn) {
 const secLabel = (sec) => { const m = /^(\d+)(?:[–-](\d+))?쪽$/.exec(sec); return m ? (m[2] ? `p.${m[1]}–${m[2]}` : `p.${m[1]}`) : sec; };
 const short = (s, n = 12) => (s.length > n ? s.slice(0, n) + '…' : s);
 const pct = (v) => `${+(v * 100).toFixed(1)}%`;
-function reqTitle(i) { const m = S.plan.missions[i]; return S.plan.reqs[m.req - 1] || `미션 ${i + 1}`; }
+// 한 요구 항목을 여러 미션으로 나눠 읽을 때는 제목 앞에 (1/2)처럼 몇 번째인지 붙인다.
+function reqTitle(i) {
+  const ms = S.plan.missions, m = ms[i];
+  const base = S.plan.reqs[m.req - 1] || `미션 ${i + 1}`;
+  const same = ms.map((x, k) => (x.req === m.req ? k : -1)).filter((k) => k >= 0);
+  return same.length > 1 ? `(${same.indexOf(i) + 1}/${same.length}) ${base}` : base;
+}
 
 function steps(active) {
   if (!S.plan) return '';
