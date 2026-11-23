@@ -541,7 +541,7 @@ function connectScreen(text = '', err = null, comment = null) {
     try { await withBusy('건너뛰는 중이에요…', () => call('connect', { session_id: S.plan.session_id, action: 'skip' })); } catch (_) { /* 무시 */ }
     resultScreen();
   });
-  $('#cont')?.addEventListener('click', resultScreen);
+  $('#cont')?.addEventListener('click', () => resultScreen());
   $('#sub')?.addEventListener('click', async () => {
     const t = $('#con').value.trim();
     if (!t) return connectScreen('', { message: '쓴 내용이 없어요. 건너뛰어도 괜찮아요.' });

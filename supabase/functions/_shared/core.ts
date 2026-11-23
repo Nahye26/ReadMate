@@ -656,7 +656,15 @@ const squash = (s: string) => s.replace(/[\s.,?!'"“”]/g, '');
 // 힌트·피드백 문장이 판정 기준(key_points)을 그대로 담고 있으면 true. 정답 유출 방지용 마지막 안전장치다.
 export function leaksKey(text: string, keys: string[]): boolean {
   const t = squash(text);
-  return keys.some((k) => squash(k).length >= 6 && t.includes(squash(k)));
+  return keys.some((k) => {
+    const sk = squash(k);
+    if (sk.length < 6) return false;
+    if (t.includes(sk)) return true;
+    // 말만 바꿔 쓴 유출: 기준의 낱말(3글자 이상) 가운데 60% 이상이 그대로 들어 있으면 유출로 본다(낱말이 4개 미만이면 보지 않는다).
+    const words = [...new Set(k.split(/[\s.,?!'"“”()·…-]+/).map((w) => w.trim()).filter((w) => w.length >= 3))];
+    const stem = (w: string) => squash(w.slice(0, Math.max(2, w.length - 2))); // 조사 차이(는/의/을)를 흘리려고 끝 두 글자를 뺀 앞부분으로 비교
+    return words.length >= 4 && words.filter((w) => t.includes(stem(w))).length / words.length >= 0.6;
+  });
 }
 
 // LLM이 고른 문장 번호를 핵심 발췌 범위 안으로 정리한다. 유효한 번호가 없으면 발췌의 앞쪽 max개를 쓴다.

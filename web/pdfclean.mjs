@@ -240,6 +240,17 @@ export function cleanPages(pages) {
     return res;
   });
 
+  // 2-1) 참고문헌: 글 뒤쪽에서 "참고문헌" 제목이 나오면 그 줄부터 끝까지 지운다(읽을 글이 아니고 질문·근거로 쓰이면 안 된다).
+  //      목차 등 앞쪽의 같은 글자는 건드리지 않도록 전체 줄의 절반 뒤에서 나온 것만 쓴다.
+  const total = kept.reduce((n, ls) => n + ls.length, 0);
+  let seenLines = 0, cut = null;
+  for (let i = 0; i < kept.length && !cut; i++) {
+    for (let k = 0; k < kept[i].length; k++, seenLines++) {
+      if (seenLines >= total * 0.5 && REFS_HEAD.test(kept[i][k].text.trim())) { cut = [i, k]; break; }
+    }
+  }
+  if (cut) kept.forEach((ls, i) => { if (i === cut[0]) ls.length = cut[1]; else if (i > cut[0]) ls.length = 0; });
+
   // 3) 제목을 정한다. 본문보다 크거나 굵은 짧은 줄. 글자 크기 정보가 없으면 번호 패턴으로 보완한다.
   const anyBySize = kept.some((ls) => ls.some((l) => isHeadBySize(l, body)));
   kept.forEach((ls) => ls.forEach((l, k) => {
@@ -306,6 +317,7 @@ function cellCount(items, body) {
   return cells;
 }
 const tabular = (items, body) => cellCount(items, body) >= 3;
+const REFS_HEAD = /^[【\[(\s]*(?:참\s*고\s*문\s*헌|참고\s*자료|references?|bibliography)[】\])\s]*$/i;
 const footnoteStart = (t) => /^\d{1,2}\)\s*\S/.test(t) || /^[*†‡]\s*\S/.test(t);
 const BOLD = /bold|black|heavy|semibold|-bd|_bd/i;
 function isHeadBySize(l, body) {
