@@ -138,3 +138,15 @@ test('stripUnsafe: NUL·제어 문자·짝 없는 서로게이트를 지우고 �
   assert.equal(stripUnsafe('😀 a\tb\n'), '😀 a\tb\n');
   assert.equal(stripUnsafe(undefined), '');
 });
+
+test('뒤쪽의 "참고문헌" 제목부터 끝까지 지우고, 앞쪽(목차)의 같은 글자는 남긴다', () => {
+  const p1 = mk([t('참고문헌 1', 700), ...body(6, 600)]);
+  const p2 = mk([...body(8, 600), t('【참고문헌】', 400, { h: 14 }), t('김도희 (2022). 갤러리 오픈런. 인문사회 21, 13(4), 79-94.', 380), t('윤소정 (2021). 팬덤의 웨이브 이론. 인문사회 21, 12(4).', 360)]);
+  const p3 = mk([t('박OO (2020). 또 다른 문헌. 학술지, 1(1), 1-10.', 600)]);
+  const out = cleanPages([p1, p2, p3]);
+  const all = out.join('\n');
+  assert.ok(!/김도희 \(2022\)|윤소정 \(2021\)|박OO/.test(all));
+  assert.ok(!/【참고문헌】/.test(all));
+  assert.ok(/참고문헌 1/.test(out[0]));
+  assert.ok(/본문 문장이 이렇게/.test(out[1]));
+});

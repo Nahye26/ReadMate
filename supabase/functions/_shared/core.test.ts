@@ -379,6 +379,9 @@ test('정답 유출 방지와 문장 번호 정리', () => {
   assert.strictEqual(leaksKey('저자는 점수 상승을 성공으로 보지 않는다고 했어요.', keys), true);
   assert.strictEqual(leaksKey('저자는 점수 상승을, 성공으로 보지 않는다', keys), true); // 구두점 무시
   assert.strictEqual(leaksKey('두 결과가 어떻게 다른지 비교해 보세요.', keys), false);
+  const k2 = ['부르디외는 취향을 계층 구별짓기의 수단으로 본다'];
+  assert.strictEqual(leaksKey('빠진 것은 취향이 계층을 구별짓기 하는 수단이라는 부르디외의 관점이에요.', k2), true); // 말만 바꾼 유출
+  assert.strictEqual(leaksKey('부르디외 부분에서 무엇을 설명하는지 다시 살펴보세요.', k2), false);
   assert.strictEqual(leaksKey('짧은', ['짧은']), false); // 너무 짧은 기준은 오탐이 많아 보지 않는다
   const pick: [string, number, number] = ['c', 2, 4];
   assert.deepStrictEqual(sentenceNums(pick, [4, 9, 3, 3, 1], 2), [3, 4]); // 범위 밖·중복 제거, 최대 2개
